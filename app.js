@@ -1017,6 +1017,7 @@ function renderInvestments() {
       <div class="balance-card ${pnlUSD<0?'negative':''}">
         <div class="balance-label">Portafolio total</div>
         <div class="balance-amount">${formatUSD(totalCurUSD)}</div>
+        <div class="balance-cop-equiv">≈ ${formatCOP(totalCurUSD * state.usdCopRate)}</div>
         <div class="balance-sub">Invertido: ${formatUSD(totalInvUSD)} · P&L: ${pnlUSD>=0?'+':''}${formatUSD(pnlUSD)} (${pctUSD>=0?'+':''}${pctUSD.toFixed(2)}%)</div>
       </div>
 

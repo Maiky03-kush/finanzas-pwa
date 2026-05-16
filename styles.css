@@ -665,3 +665,5 @@ body {
 .ph-usd   { color: var(--text-secondary); font-size: 11px; }
 .ph-pnl   { text-align: right; font-weight: 600; font-size: 12px; line-height: 1.3; }
 .ph-empty { font-size: 13px; color: var(--muted); margin: 8px 0; }
+
+.balance-cop-equiv { font-size: 15px; color: rgba(255,255,255,.6); margin: 2px 0 6px; letter-spacing: .2px; }
