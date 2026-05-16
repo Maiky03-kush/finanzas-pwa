@@ -15,6 +15,7 @@ let state = {
   transactions: [], savings: [], investments: [], investmentPurchases: [],
   subscriptions: [],
   view: 'dashboard', syncing: false,
+  tokenRefreshTimer: null,
   gapiReady: false, gisReady: false, tokenClient: null,
   addType: 'Gasto', addPaymentMethod: 'Efectivo',
   txFilter: 'Gasto', txSearch: '',
@@ -256,17 +257,30 @@ function checkReady() {
 }
 
 async function handleTokenResponse(resp) {
-  if (resp.error) { console.error(resp); return; }
+  if (resp.error) {
+    // Silent re-auth failed (token expired or interaction required).
+    // Clear the flag so we don't loop on next load, then show reconnect UI.
+    localStorage.removeItem('finanzas_wasConnected');
+    showReconnectBanner();
+    console.warn('Google auth error:', resp.error);
+    return;
+  }
+  hideReconnectBanner();
   state.accessToken = resp.access_token;
   localStorage.setItem('finanzas_wasConnected', '1');
+  // Proactively renew the token 5 min before it expires (default 3600s)
+  clearTimeout(state.tokenRefreshTimer);
+  const renewIn = ((resp.expires_in || 3600) - 300) * 1000;
+  state.tokenRefreshTimer = setTimeout(() => {
+    if (state.tokenClient) state.tokenClient.requestAccessToken({ prompt: '' });
+  }, renewIn);
   updateAuthUI(true);
   updateSyncBadge('Sincronizando…','syncing');
   await ensureSpreadsheet();
   await syncFromSheets();
+  await syncPreciosTab();
   updateSyncBadge('Sincronizado ✓','synced');
   renderView();
-  // Refresh live prices immediately after login sync so Valor Actual
-  // is always current — writes updated values back to the sheet too
   if (state.investments.some(i => i.ticker)) {
     refreshInvestmentPrices().then(() => {
       updateSyncBadge('Sincronizado ✓','synced');
@@ -274,11 +288,31 @@ async function handleTokenResponse(resp) {
     });
   }
 }
+
+function showReconnectBanner() {
+  let b = document.getElementById('reconnect-banner');
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'reconnect-banner';
+    b.className = 'reconnect-banner';
+    b.innerHTML = '<span>⚠️ Sesión expirada — mostrando datos guardados localmente</span>'
+      + '<button onclick="toggleAuth()">Reconectar Google</button>';
+    document.querySelector('.app-header').insertAdjacentElement('afterend', b);
+  }
+  b.style.display = 'flex';
+}
+
+function hideReconnectBanner() {
+  const b = document.getElementById('reconnect-banner');
+  if (b) b.style.display = 'none';
+}
 function toggleAuth() {
   if (state.accessToken) {
     google.accounts.oauth2.revoke(state.accessToken, ()=>{});
+    clearTimeout(state.tokenRefreshTimer);
     state.accessToken = null; state.user = null;
     localStorage.removeItem('finanzas_wasConnected');
+    hideReconnectBanner();
     updateAuthUI(false); updateSyncBadge('Local'); renderView();
   } else {
     if (!state.tokenClient) { alert('Google aún no cargó, espera un segundo.'); return; }
@@ -323,7 +357,7 @@ async function ensureSpreadsheet() {
     resource:{ properties:{title:CONFIG.SHEET_NAME}, sheets:[
       {properties:{title:'Transacciones'}},{properties:{title:'Ahorro'}},
       {properties:{title:'Inversiones'}},{properties:{title:'Compras_Inv'}},
-      {properties:{title:'Suscripciones'}}
+      {properties:{title:'Suscripciones'}},{properties:{title:'Precios'}}
     ]}
   });
   state.spreadsheetId = createResp.result.spreadsheetId;
@@ -334,22 +368,27 @@ async function ensureSpreadsheet() {
     resource:{ valueInputOption:'RAW', data:[
       { range:'Transacciones!A1:G1', values:[['ID','Fecha','Tipo','Categoría','Descripción','Monto','Pago']] },
       { range:'Ahorro!A1:F1',        values:[['ID','Nombre','Meta','Actual','Fecha Límite','Notas']] },
-      { range:'Inversiones!A1:K1',   values:[['ID','Nombre','Ticker','Tipo','Invertido','Valor Actual','Acciones','Precio Compra','Notas','Ganancia $','Ganancia %']] },
+      { range:'Inversiones!A1:N1',   values:[['ID','Nombre','Ticker','Tipo','Invertido $','Valor Actual (App)','Acciones','Precio Compra $','Notas','Ganancia $','Ganancia %','Precio GFIN $','Valor GFIN $','Δ App vs GFIN']] },
       { range:'Compras_Inv!A1:F1',   values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoUSD']] },
-      { range:'Suscripciones!A1:H1', values:[['ID','Nombre','Monto','Moneda','Frecuencia','ProximoPago','Categoria','Notas']] }
+      { range:'Suscripciones!A1:H1', values:[['ID','Nombre','Monto','Moneda','Frecuencia','ProximoPago','Categoria','Notas']] },
+      { range:'Precios!A1:C1',       values:[['Ticker','Precio Live (GFIN)','Última actualización']] }
     ]}
   });
-  // Set ARRAYFORMULA for Inversiones calculated columns (J=Ganancia$, K=Ganancia%)
-  // These are the ONLY columns the app never writes — the sheet computes them automatically
+  // Sheet-managed formulas for Inversiones (app never writes to J:N)
+  // J=Ganancia$  K=Ganancia%  L=Precio GFIN  M=Valor GFIN$  N=Diferencia
   try {
     await gapi.client.sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: state.spreadsheetId,
       resource:{ valueInputOption:'USER_ENTERED', data:[
         { range:'Inversiones!J2', values:[['=ARRAYFORMULA(F2:F-E2:E)']] },
-        { range:'Inversiones!K2', values:[['=ARRAYFORMULA((F2:F-E2:E)/(E2:E+(E2:E=0))*100)']] }
+        { range:'Inversiones!K2', values:[['=ARRAYFORMULA((F2:F-E2:E)/(E2:E+(E2:E=0))*100)']] },
+        { range:'Inversiones!L2', values:[['=ARRAYFORMULA(IFERROR(VLOOKUP(C2:C,Precios!A:B,2,FALSE),""))']] },
+        { range:'Inversiones!M2', values:[['=ARRAYFORMULA(IF((G2:G>0)*(L2:L<>""),G2:G*L2:L,""))']] },
+        { range:'Inversiones!N2', values:[['=ARRAYFORMULA(IF((F2:F>0)*(M2:M<>""),M2:M-F2:F,""))']] }
       ]}
     });
-  } catch(e) { console.warn('ensureSpreadsheet ARRAYFORMULA:', e); }
+  } catch(e) { console.warn('ensureSpreadsheet formulas:', e); }
+  await ensurePreciosSheet();
 }
 
 async function ensureSuscripcionesSheet() {
@@ -388,6 +427,68 @@ async function ensureComprasInvSheet() {
   } catch(e) {}
 }
 
+/* ── Precios sheet (GOOGLEFINANCE live prices) ───────────── */
+async function ensurePreciosSheet() {
+  if (!state.spreadsheetId) return;
+  try {
+    const meta = await gapi.client.sheets.spreadsheets.get({spreadsheetId: state.spreadsheetId});
+    const exists = meta.result.sheets.some(s => s.properties.title === 'Precios');
+    if (!exists) {
+      await gapi.client.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: state.spreadsheetId,
+        resource: { requests: [{ addSheet: { properties: { title: 'Precios' } } }] }
+      });
+    }
+    await gapi.client.sheets.spreadsheets.values.update({
+      spreadsheetId: state.spreadsheetId, range: 'Precios!A1:C1',
+      valueInputOption: 'RAW',
+      resource: { values: [['Ticker', 'Precio Live (GFIN)', 'Última actualización']] }
+    });
+  } catch(e) { console.warn('ensurePreciosSheet:', e); }
+}
+
+// Writes unique tickers to Precios!A and per-row GOOGLEFINANCE formulas to B.
+// Handles stocks (AAPL), ETFs (SCHD), and crypto pairs (ETH-USD → CURRENCY:ETHUSD).
+// The sheet then computes live prices automatically whenever it is opened.
+async function syncPreciosTab() {
+  if (!state.spreadsheetId || !state.accessToken) return;
+  const tickers = [...new Set(state.investments.filter(i => i.ticker).map(i => i.ticker))];
+  if (!tickers.length) return;
+  try {
+    await ensurePreciosSheet();
+    // Clear old data (keep header)
+    await gapi.client.sheets.spreadsheets.values.batchClear({
+      spreadsheetId: state.spreadsheetId,
+      resource: { ranges: ['Precios!A2:C'] }
+    });
+    // Write tickers and GOOGLEFINANCE formulas row by row
+    const tickerValues  = tickers.map(t => [t]);
+    const formulaValues = tickers.map((t, i) => {
+      const row = i + 2;
+      // Crypto pairs like ETH-USD → CURRENCY:ETHUSD; stocks/ETFs pass through as-is
+      const gfinTicker = /^[A-Z]+-USD$/.test(t)
+        ? `"CURRENCY:${t.replace('-USD','USD')}"`
+        : `A${row}`;
+      return [
+        `=IFERROR(IF(REGEXMATCH(A${row},"-USD"),GOOGLEFINANCE("CURRENCY:"&REGEXREPLACE(A${row},"-USD","")&"USD","price"),GOOGLEFINANCE(A${row},"price")),"N/D")`,
+        `=NOW()`
+      ];
+    });
+    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: state.spreadsheetId,
+      resource: { valueInputOption: 'RAW', data: [
+        { range: 'Precios!A2:A', values: tickerValues }
+      ]}
+    });
+    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: state.spreadsheetId,
+      resource: { valueInputOption: 'USER_ENTERED', data: [
+        { range: 'Precios!B2:C', values: formulaValues }
+      ]}
+    });
+  } catch(e) { console.warn('syncPreciosTab:', e); }
+}
+
 /* ── Sheet formula migration ─────────────────────────────── */
 // Replaces raw Ganancia numbers in Inversiones!J:K with ARRAYFORMULA.
 // Uses pure-math formulas (no IF/SI) to avoid Google Sheets locale issues.
@@ -395,38 +496,38 @@ async function ensureComprasInvSheet() {
 async function migrateInversionesFormulas() {
   if (!state.spreadsheetId || !state.accessToken) return;
   try {
-    // 1. Clear old values/broken formulas in J and K
     await gapi.client.sheets.spreadsheets.values.batchClear({
       spreadsheetId: state.spreadsheetId,
-      resource: { ranges: ['Inversiones!J:K'] }
+      resource: { ranges: ['Inversiones!J:N'] }
     });
-    // 2. Restore plain-text headers
     await gapi.client.sheets.spreadsheets.values.update({
       spreadsheetId: state.spreadsheetId,
-      range: 'Inversiones!J1:K1',
+      range: 'Inversiones!J1:N1',
       valueInputOption: 'RAW',
-      resource: { values: [['Ganancia $', 'Ganancia %']] }
+      resource: { values: [['Ganancia $','Ganancia %','Precio GFIN $','Valor GFIN $','Δ App vs GFIN']] }
     });
-    // 3. Pure-math ARRAYFORMULA — no locale-specific function names (no IF/SI).
-    //    J = F - E   (Valor Actual - Invertido)
-    //    K = (F-E) / (E + (E=0)) * 100   → the (E=0) trick avoids DIV/0 without IFERROR
     await gapi.client.sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: state.spreadsheetId,
       resource: { valueInputOption: 'USER_ENTERED', data: [
         { range: 'Inversiones!J2', values: [['=ARRAYFORMULA(F2:F-E2:E)']] },
-        { range: 'Inversiones!K2', values: [['=ARRAYFORMULA((F2:F-E2:E)/(E2:E+(E2:E=0))*100)']] }
+        { range: 'Inversiones!K2', values: [['=ARRAYFORMULA((F2:F-E2:E)/(E2:E+(E2:E=0))*100)']] },
+        { range: 'Inversiones!L2', values: [['=ARRAYFORMULA(IFERROR(VLOOKUP(C2:C,Precios!A:B,2,FALSE),""))']] },
+        { range: 'Inversiones!M2', values: [['=ARRAYFORMULA(IF((G2:G>0)*(L2:L<>""),G2:G*L2:L,""))']] },
+        { range: 'Inversiones!N2', values: [['=ARRAYFORMULA(IF((F2:F>0)*(M2:M<>""),M2:M-F2:F,""))']] }
       ]}
     });
+    await ensurePreciosSheet();
   } catch(e) { console.warn('migrateInversionesFormulas:', e); }
 }
 
 async function syncFromSheets() {
   if (!state.spreadsheetId || !state.accessToken) return;
-  // Migration v2: fix locale-broken formulas in J/K (bumped from v1)
-  if (!localStorage.getItem('finanzas_formulas_v2')) {
+  // Migration v3: add L/M/N GOOGLEFINANCE columns + Precios tab (bumped from v2)
+  if (!localStorage.getItem('finanzas_formulas_v3')) {
     localStorage.removeItem('finanzas_formulas_v1');
+    localStorage.removeItem('finanzas_formulas_v2');
     await migrateInversionesFormulas();
-    localStorage.setItem('finanzas_formulas_v2', '1');
+    localStorage.setItem('finanzas_formulas_v3', '1');
   }
   try {
     const resp = await gapi.client.sheets.spreadsheets.values.batchGet({
@@ -607,8 +708,7 @@ async function markSubscriptionPaid(id) {
 }
 
 /* ── Investment row helper ───────────────────────────────── */
-// Returns columns A-I only (J=Ganancia$, K=Ganancia% are managed
-// by ARRAYFORMULA in the sheet — never written by the app)
+// Returns columns A-I only (J:N are sheet-managed formulas — never written by the app)
 function invArr(inv) {
   return [inv.id, inv.name, inv.ticker||'', inv.type||'', inv.invested, inv.currentValue,
           inv.shares||0, inv.purchasePrice||0, inv.notes||''];
@@ -620,6 +720,7 @@ async function addInvestment(inv) {
   if (!inv.currentValue) inv.currentValue = inv.invested;
   state.investments.push(inv); saveLocal(); renderView();
   try { await appendRow('Inversiones', invArr(inv)); } catch(e) {}
+  if (inv.ticker) syncPreciosTab().catch(()=>{});
 }
 async function updateInvestmentValue(id, newValue) {
   const inv = state.investments.find(i=>i.id===id); if (!inv) return;
@@ -633,6 +734,7 @@ async function deleteInvestment(id) {
   saveLocal(); renderView();
   try { await deleteRowById('Inversiones',id); } catch(e) {}
   for (const p of relPurchases) { try { await deleteRowById('Compras_Inv',p.id); } catch(e) {} }
+  syncPreciosTab().catch(()=>{});
 }
 
 async function addInvestmentPurchase(purchase) {

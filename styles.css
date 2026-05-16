@@ -89,6 +89,35 @@ body {
 .auth-btn:active { opacity: .8; }
 .auth-btn.signed-in { background: var(--green); }
 
+/* ─── RECONNECT BANNER ─── */
+.reconnect-banner {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(255, 159, 10, 0.15);
+  border-bottom: 1px solid rgba(255, 159, 10, 0.3);
+  font-size: 13px;
+  color: #c07800;
+}
+@media (prefers-color-scheme: dark) {
+  .reconnect-banner { color: #ffcc44; background: rgba(255,159,10,0.12); }
+}
+.reconnect-banner span { flex: 1; }
+.reconnect-banner button {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-radius: 20px;
+  border: none;
+  background: rgba(255,159,10,0.3);
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.reconnect-banner button:active { opacity: .8; }
+
 /* ─── BOTTOM NAV ─── */
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0;
