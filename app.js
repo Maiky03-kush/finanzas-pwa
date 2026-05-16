@@ -998,18 +998,26 @@ function savingsCard(s) {
    VIEW: INVESTMENTS (live prices)
    ════════════════════════════════════════════════════════════ */
 function renderInvestments() {
-  const { invested, current, pnl, pct } = getPortfolioSummary();
   const lastUpd = state.pricesLastUpdated
     ? state.pricesLastUpdated.toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
     : null;
-  const hasLive = state.investments.some(i=>i.ticker && i.marketPrice);
+
+  // Portfolio totals in USD
+  let totalInvUSD = 0, totalCurUSD = 0;
+  state.investments.forEach(i => {
+    const invUSD = i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : i.invested/state.usdCopRate;
+    const curUSD = i.shares>0&&i.marketPrice ? i.shares*i.marketPrice : i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : i.currentValue/state.usdCopRate;
+    totalInvUSD += invUSD; totalCurUSD += curUSD;
+  });
+  const pnlUSD = totalCurUSD - totalInvUSD;
+  const pctUSD = totalInvUSD>0 ? (pnlUSD/totalInvUSD*100) : 0;
 
   document.getElementById('app-content').innerHTML = `
     <div class="content-inner">
-      <div class="balance-card ${pnl<0?'negative':''}">
+      <div class="balance-card ${pnlUSD<0?'negative':''}">
         <div class="balance-label">Portafolio total</div>
-        <div class="balance-amount">${formatCOP(current)}</div>
-        <div class="balance-sub">Invertido: ${formatCOP(invested)} · P&L: ${pnl>=0?'+':''}${formatCOP(pnl)} (${pct>=0?'+':''}${pct.toFixed(2)}%)</div>
+        <div class="balance-amount">${formatUSD(totalCurUSD)}</div>
+        <div class="balance-sub">Invertido: ${formatUSD(totalInvUSD)} · P&L: ${pnlUSD>=0?'+':''}${formatUSD(pnlUSD)} (${pctUSD>=0?'+':''}${pctUSD.toFixed(2)}%)</div>
       </div>
 
       <!-- Market info bar -->
@@ -1038,16 +1046,17 @@ function purchaseHistorySection(inv) {
   const livePrice   = inv.marketPrice || 0;
 
   const rows = purchases.map(p=>{
-    const lotVal = livePrice>0 ? p.shares*livePrice*state.usdCopRate : 0;
-    const lotPnl = lotVal - p.amountCOP;
-    const lotPct = p.amountCOP>0 ? (lotPnl/p.amountCOP*100) : 0;
+    const costUSD   = p.shares * p.priceUSD;
+    const lotValUSD = livePrice>0 ? p.shares*livePrice : costUSD;
+    const lotPnlUSD = lotValUSD - costUSD;
+    const lotPct    = costUSD>0 ? (lotPnlUSD/costUSD*100) : 0;
     return `
       <div class="ph-row">
         <span class="ph-date">${dateStr(p.date)}</span>
         <span class="ph-shares">${p.shares} acc.</span>
         <span class="ph-price">${formatUSD(p.priceUSD)}</span>
-        <span class="ph-cop">${formatCOP(p.amountCOP)}</span>
-        ${livePrice>0?`<span class="ph-pnl ${lotPnl>=0?'profit':'loss'}">${lotPnl>=0?'+':''}${formatCOP(lotPnl)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
+        <span class="ph-usd">${formatUSD(costUSD)}</span>
+        ${livePrice>0?`<span class="ph-pnl ${lotPnlUSD>=0?'profit':'loss'}">${lotPnlUSD>=0?'+':''}${formatUSD(lotPnlUSD)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
       </div>`;
   }).join('');
 
@@ -1065,7 +1074,7 @@ function purchaseHistorySection(inv) {
             ${livePrice>0&&weightedAvg>0?`<span class="${livePrice>=weightedAvg?'profit':'loss'}">vs actual ${formatUSD(livePrice)} (${((livePrice-weightedAvg)/weightedAvg*100)>=0?'+':''}${((livePrice-weightedAvg)/weightedAvg*100).toFixed(1)}%)</span>`:''}
           </div>
           <div class="ph-cols-header">
-            <span>Fecha</span><span>Acciones</span><span>Precio</span><span>COP</span>${livePrice>0?'<span>P&L</span>':''}
+            <span>Fecha</span><span>Acciones</span><span>Precio</span><span>Total USD</span>${livePrice>0?'<span>P&L</span>':''}
           </div>
           ${rows}`:'<p class="ph-empty">Sin compras registradas.</p>'}
         <button class="btn-small" style="margin-top:10px" onclick="openAddPurchaseModal('${inv.id}')">+ Agregar compra</button>
@@ -1074,12 +1083,24 @@ function purchaseHistorySection(inv) {
 }
 
 function investmentCard(inv) {
-  const pnl = inv.currentValue - inv.invested;
-  const pct = inv.invested>0?(pnl/inv.invested*100):0;
-  const port = getPortfolioSummary();
-  const weight = port.current>0?(inv.currentValue/port.current*100):0;
   const hasLive = inv.ticker && inv.marketPrice != null;
   const changeUp = (inv.marketChangePct||0) >= 0;
+  const hasShares = inv.shares > 0 && inv.purchasePrice > 0;
+
+  // USD calculations
+  const investedUSD = hasShares ? inv.shares * inv.purchasePrice : inv.invested / state.usdCopRate;
+  const currentUSD  = hasShares && hasLive ? inv.shares * inv.marketPrice
+                    : hasShares ? inv.shares * inv.purchasePrice
+                    : inv.currentValue / state.usdCopRate;
+  const pnlUSD = currentUSD - investedUSD;
+  const pct    = investedUSD > 0 ? (pnlUSD / investedUSD * 100) : 0;
+
+  // Weight in portfolio (use USD)
+  let totalCurUSD = 0;
+  state.investments.forEach(i => {
+    totalCurUSD += i.shares>0&&i.marketPrice ? i.shares*i.marketPrice : i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : i.currentValue/state.usdCopRate;
+  });
+  const weight = totalCurUSD > 0 ? (currentUSD / totalCurUSD * 100) : 0;
 
   return `
     <div class="inv-card">
@@ -1107,15 +1128,15 @@ function investmentCard(inv) {
       <div class="pnl-row">
         <div class="pnl-item">
           <div class="pnl-label">Invertido</div>
-          <div class="pnl-value">${formatCOP(inv.invested)}</div>
+          <div class="pnl-value">${formatUSD(investedUSD)}</div>
         </div>
         <div class="pnl-item">
           <div class="pnl-label">Valor actual</div>
-          <div class="pnl-value">${formatCOP(inv.currentValue)}</div>
+          <div class="pnl-value">${formatUSD(currentUSD)}</div>
         </div>
         <div class="pnl-item">
           <div class="pnl-label">P&L total</div>
-          <div class="pnl-value ${pnl>=0?'profit':'loss'}">${pnl>=0?'+':''}${formatCOP(pnl)}<br><small>${pct>=0?'+':''}${pct.toFixed(2)}%</small></div>
+          <div class="pnl-value ${pnlUSD>=0?'profit':'loss'}">${pnlUSD>=0?'+':''}${formatUSD(pnlUSD)}<br><small>${pct>=0?'+':''}${pct.toFixed(2)}%</small></div>
         </div>
       </div>
 
