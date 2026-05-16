@@ -12,10 +12,10 @@ const CONFIG = {
 
 let state = {
   user: null, accessToken: null, spreadsheetId: null,
-  transactions: [], savings: [], investments: [],
+  transactions: [], savings: [], investments: [], investmentPurchases: [],
   view: 'dashboard', syncing: false,
   gapiReady: false, gisReady: false, tokenClient: null,
-  addType: 'Gasto',
+  addType: 'Gasto', addPaymentMethod: 'Efectivo',
   txFilter: 'Gasto',
   usdCopRate: 4200,
   priceRefreshTimer: null,
@@ -39,14 +39,16 @@ function saveLocal() {
   const invToSave = state.investments.map(({ marketPrice, marketChange, marketChangePct, marketCurrency, ...rest }) => rest);
   localStorage.setItem('finanzas_investments',  JSON.stringify(invToSave));
   if (state.spreadsheetId) localStorage.setItem('finanzas_sheetId', state.spreadsheetId);
+  localStorage.setItem('finanzas_inv_purchases', JSON.stringify(state.investmentPurchases));
 }
 
 function loadLocal() {
   try {
-    state.transactions  = JSON.parse(localStorage.getItem('finanzas_transactions') || '[]');
-    state.savings       = JSON.parse(localStorage.getItem('finanzas_savings')      || '[]');
-    state.investments   = JSON.parse(localStorage.getItem('finanzas_investments')  || '[]');
-    state.spreadsheetId = localStorage.getItem('finanzas_sheetId') || null;
+    state.transactions       = JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
+    state.savings            = JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
+    state.investments        = JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
+    state.investmentPurchases= JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
+    state.spreadsheetId      = localStorage.getItem('finanzas_sheetId') || null;
   } catch(e) { state.transactions = []; state.savings = []; state.investments = []; }
 }
 
@@ -274,18 +276,40 @@ async function ensureSpreadsheet() {
   const files = driveResp.result.files || [];
   if (files.length > 0) { state.spreadsheetId = files[0].id; localStorage.setItem('finanzas_sheetId', state.spreadsheetId); return; }
   const createResp = await gapi.client.sheets.spreadsheets.create({
-    resource:{ properties:{title:CONFIG.SHEET_NAME}, sheets:[{properties:{title:'Transacciones'}},{properties:{title:'Ahorro'}},{properties:{title:'Inversiones'}}] }
+    resource:{ properties:{title:CONFIG.SHEET_NAME}, sheets:[
+      {properties:{title:'Transacciones'}},{properties:{title:'Ahorro'}},
+      {properties:{title:'Inversiones'}},{properties:{title:'Compras_Inv'}}
+    ]}
   });
   state.spreadsheetId = createResp.result.spreadsheetId;
   localStorage.setItem('finanzas_sheetId', state.spreadsheetId);
   await gapi.client.sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: state.spreadsheetId,
     resource:{ valueInputOption:'RAW', data:[
-      { range:'Transacciones!A1:F1', values:[['ID','Fecha','Tipo','Categoría','Descripción','Monto']] },
+      { range:'Transacciones!A1:G1', values:[['ID','Fecha','Tipo','Categoría','Descripción','Monto','Pago']] },
       { range:'Ahorro!A1:F1',        values:[['ID','Nombre','Meta','Actual','Fecha Límite','Notas']] },
-      { range:'Inversiones!A1:I1',   values:[['ID','Nombre','Ticker','Tipo','Invertido','Valor Actual','Acciones','Precio Compra','Notas']] }
+      { range:'Inversiones!A1:I1',   values:[['ID','Nombre','Ticker','Tipo','Invertido','Valor Actual','Acciones','Precio Compra','Notas']] },
+      { range:'Compras_Inv!A1:F1',   values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoCOP']] }
     ]}
   });
+}
+
+async function ensureComprasInvSheet() {
+  if (!state.spreadsheetId) return;
+  try {
+    const meta = await gapi.client.sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
+    const exists = meta.result.sheets.some(s=>s.properties.title==='Compras_Inv');
+    if (!exists) {
+      await gapi.client.sheets.spreadsheets.batchUpdate({
+        spreadsheetId:state.spreadsheetId,
+        resource:{requests:[{addSheet:{properties:{title:'Compras_Inv'}}}]}
+      });
+      await gapi.client.sheets.spreadsheets.values.update({
+        spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A1:F1',
+        valueInputOption:'RAW', resource:{values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoCOP']]}
+      });
+    }
+  } catch(e) {}
 }
 
 async function syncFromSheets() {
@@ -293,12 +317,18 @@ async function syncFromSheets() {
   try {
     const resp = await gapi.client.sheets.spreadsheets.values.batchGet({
       spreadsheetId: state.spreadsheetId,
-      ranges:['Transacciones!A2:F','Ahorro!A2:F','Inversiones!A2:I']
+      ranges:['Transacciones!A2:G','Ahorro!A2:F','Inversiones!A2:I']
     });
     const vrs = resp.result.valueRanges;
-    state.transactions = (vrs[0].values||[]).map(r=>({ id:r[0]||uid(), date:r[1]||'', type:r[2]||'Gasto', category:r[3]||'Otros', description:r[4]||'', amount:Number(r[5])||0 })).filter(t=>t.date);
+    state.transactions = (vrs[0].values||[]).map(r=>({ id:r[0]||uid(), date:r[1]||'', type:r[2]||'Gasto', category:r[3]||'Otros', description:r[4]||'', amount:Number(r[5])||0, paymentMethod:r[6]||'' })).filter(t=>t.date);
     state.savings      = (vrs[1].values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', goal:Number(r[2])||0, current:Number(r[3])||0, deadline:r[4]||'', notes:r[5]||'' })).filter(s=>s.name);
     state.investments  = (vrs[2].values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', ticker:r[2]||'', type:r[3]||'', invested:Number(r[4])||0, currentValue:Number(r[5])||0, shares:Number(r[6])||0, purchasePrice:Number(r[7])||0, notes:r[8]||'' })).filter(i=>i.name);
+    try {
+      const purResp = await gapi.client.sheets.spreadsheets.values.get({
+        spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F'
+      });
+      state.investmentPurchases = (purResp.result.values||[]).map(r=>({ id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'', shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountCOP:Number(r[5])||0 })).filter(p=>p.investmentId);
+    } catch(e) { await ensureComprasInvSheet(); }
     saveLocal();
   } catch(e) { console.error('syncFromSheets', e); }
 }
@@ -331,7 +361,7 @@ async function updateRowById(sheet, id, values) {
 /* ── CRUD: Transactions ──────────────────────────────────── */
 async function addTransaction(tx) {
   tx.id = uid(); state.transactions.unshift(tx); saveLocal(); renderView();
-  try { await appendRow('Transacciones',[tx.id,tx.date,tx.type,tx.category,tx.description,tx.amount]); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { updateSyncBadge('Error sync','error'); }
+  try { await appendRow('Transacciones',[tx.id,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||'']); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { updateSyncBadge('Error sync','error'); }
 }
 async function deleteTransaction(id) {
   state.transactions = state.transactions.filter(t=>t.id!==id); saveLocal(); renderView();
@@ -366,8 +396,31 @@ async function updateInvestmentValue(id, newValue) {
   try { await updateRowById('Inversiones',id,[id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']); } catch(e) {}
 }
 async function deleteInvestment(id) {
-  state.investments = state.investments.filter(i=>i.id!==id); saveLocal(); renderView();
+  const relPurchases = state.investmentPurchases.filter(p=>p.investmentId===id);
+  state.investments = state.investments.filter(i=>i.id!==id);
+  state.investmentPurchases = state.investmentPurchases.filter(p=>p.investmentId!==id);
+  saveLocal(); renderView();
   try { await deleteRowById('Inversiones',id); } catch(e) {}
+  for (const p of relPurchases) { try { await deleteRowById('Compras_Inv',p.id); } catch(e) {} }
+}
+
+async function addInvestmentPurchase(purchase) {
+  purchase.id = uid();
+  state.investmentPurchases.push(purchase);
+  const inv = state.investments.find(i=>i.id===purchase.investmentId);
+  if (inv) {
+    const allP = state.investmentPurchases.filter(p=>p.investmentId===inv.id);
+    inv.shares        = allP.reduce((a,p)=>a+p.shares, 0);
+    inv.invested      = allP.reduce((a,p)=>a+p.amountCOP, 0);
+    const totalShares = inv.shares;
+    inv.purchasePrice = totalShares>0 ? allP.reduce((a,p)=>a+p.shares*p.priceUSD,0)/totalShares : 0;
+    if (!inv.ticker) inv.currentValue = inv.invested;
+  }
+  saveLocal(); renderView();
+  try {
+    await appendRow('Compras_Inv',[purchase.id,purchase.investmentId,purchase.date,purchase.shares,purchase.priceUSD,purchase.amountCOP]);
+    if (inv) await updateRowById('Inversiones',inv.id,[inv.id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']);
+  } catch(e) {}
 }
 
 /* ── Modal ───────────────────────────────────────────────── */
@@ -411,19 +464,29 @@ function openTransactionModal(tx) {
         <label class="form-label">Monto (COP)</label>
         <input class="form-input" type="number" id="tx-amount" placeholder="0" min="0" value="${tx?.amount||''}" required>
       </div>
+      ${type==='Gasto'?`
+      <div class="form-group">
+        <label class="form-label">Método de pago</label>
+        <div class="pay-toggle">
+          <button type="button" class="pay-btn ${(tx?.paymentMethod||state.addPaymentMethod)==='Efectivo'?'active':''}" onclick="switchPayMethod('Efectivo')">💵 Efectivo</button>
+          <button type="button" class="pay-btn ${(tx?.paymentMethod||state.addPaymentMethod)==='Tarjeta'?'active':''}" onclick="switchPayMethod('Tarjeta')">💳 Tarjeta</button>
+        </div>
+      </div>`:''}
       <button type="submit" class="btn-primary">${editing?'Guardar cambios':'Agregar'}</button>
     </form>`);
 }
-function switchModalType(type) { state.addType=type; openTransactionModal(); }
+function switchModalType(type) { state.addType=type; state.addPaymentMethod='Efectivo'; openTransactionModal(); }
+function switchPayMethod(method) { state.addPaymentMethod=method; document.querySelectorAll('.pay-btn').forEach(b=>b.classList.toggle('active',b.textContent.includes(method))); }
 async function submitTransaction(e, editId) {
   e.preventDefault();
-  const tx = { date:document.getElementById('tx-date').value, type:state.addType, category:document.getElementById('tx-cat').value, description:document.getElementById('tx-desc').value.trim(), amount:Number(document.getElementById('tx-amount').value) };
+  const paymentMethod = state.addType==='Gasto' ? state.addPaymentMethod : '';
+  const tx = { date:document.getElementById('tx-date').value, type:state.addType, category:document.getElementById('tx-cat').value, description:document.getElementById('tx-desc').value.trim(), amount:Number(document.getElementById('tx-amount').value), paymentMethod };
   closeModal();
   if (editId) {
     const idx = state.transactions.findIndex(t=>t.id===editId);
     if (idx>=0) state.transactions[idx] = {...state.transactions[idx],...tx};
     saveLocal(); renderView();
-    try { await updateRowById('Transacciones',editId,[editId,tx.date,tx.type,tx.category,tx.description,tx.amount]); } catch(e) {}
+    try { await updateRowById('Transacciones',editId,[editId,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||'']); } catch(e) {}
   } else { await addTransaction(tx); }
 }
 
@@ -594,7 +657,68 @@ async function submitInvestment(e) {
   };
   closeModal();
   await addInvestment(inv);
+  if (shares > 0 && purchasePrice > 0) {
+    await addInvestmentPurchase({ investmentId:inv.id, date:todayISO(), shares, priceUSD:purchasePrice, amountCOP:invested });
+  }
   if (inv.ticker) { await refreshInvestmentPrices(); renderView(); }
+}
+
+function openAddPurchaseModal(invId) {
+  const inv = state.investments.find(i=>i.id===invId);
+  if (!inv) return;
+  openModal(`
+    <div class="modal-header">
+      <h2 class="modal-title">Agregar Compra</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <p style="color:var(--text-secondary);margin-bottom:16px">${inv.name}${inv.ticker?' ('+inv.ticker+')':''}</p>
+    <form onsubmit="submitAddPurchase(event,'${invId}')">
+      <div class="form-group">
+        <label class="form-label">Fecha de compra</label>
+        <input class="form-input" type="date" id="pur-date" value="${todayISO()}" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">N° acciones</label>
+          <input class="form-input" type="number" id="pur-shares" placeholder="0" min="0" step="any" oninput="calcPurchaseAmount()" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Precio USD</label>
+          <input class="form-input" type="number" id="pur-price" placeholder="0.00" min="0" step="any" value="${inv.marketPrice||inv.purchasePrice||''}" oninput="calcPurchaseAmount()">
+        </div>
+      </div>
+      <div class="calc-hint" id="pur-calc-hint"></div>
+      <div class="form-group">
+        <label class="form-label">Monto COP</label>
+        <input class="form-input" type="number" id="pur-amount" placeholder="0" min="0" required>
+      </div>
+      <button type="submit" class="btn-primary">Registrar compra</button>
+    </form>`);
+}
+function calcPurchaseAmount() {
+  const shares = Number(document.getElementById('pur-shares')?.value)||0;
+  const price  = Number(document.getElementById('pur-price')?.value)||0;
+  const hint   = document.getElementById('pur-calc-hint');
+  if (shares>0 && price>0) {
+    const cop = Math.round(shares*price*state.usdCopRate);
+    document.getElementById('pur-amount').value = cop;
+    if (hint) hint.textContent = `${shares} × ${formatUSD(price)} × ${Math.round(state.usdCopRate).toLocaleString('es-CO')} = ${formatCOP(cop)}`;
+  } else { if (hint) hint.textContent=''; }
+}
+async function submitAddPurchase(e, invId) {
+  e.preventDefault();
+  const purchase = { investmentId:invId, date:document.getElementById('pur-date').value, shares:Number(document.getElementById('pur-shares').value)||0, priceUSD:Number(document.getElementById('pur-price').value)||0, amountCOP:Number(document.getElementById('pur-amount').value)||0 };
+  closeModal();
+  await addInvestmentPurchase(purchase);
+  await refreshInvestmentPrices();
+  renderView();
+}
+function togglePurchaseHistory(invId) {
+  const el = document.getElementById(`ph-${invId}`);
+  const arr = document.getElementById(`ph-arrow-${invId}`);
+  if (!el) return;
+  const hidden = el.classList.toggle('hidden');
+  if (arr) arr.textContent = hidden ? '▶' : '▼';
 }
 function openUpdateValueModal(id) {
   const inv = state.investments.find(i=>i.id===id); if (!inv) return;
@@ -809,11 +933,12 @@ function renderTransactions() {
 
 function txCard(t, showActions=false) {
   const isExp = t.type==='Gasto';
+  const payBadge = t.paymentMethod==='Tarjeta' ? '<span class="pay-badge card">💳</span>' : t.paymentMethod==='Efectivo' ? '<span class="pay-badge cash">💵</span>' : '';
   return `
     <div class="tx-card">
       <div class="tx-icon">${catIcon(t.category)}</div>
       <div class="tx-info">
-        <div class="tx-desc">${t.description}</div>
+        <div class="tx-desc">${t.description}${payBadge}</div>
         <div class="tx-meta">${t.category} · ${dateStr(t.date)}</div>
       </div>
       <div class="tx-right">
@@ -905,6 +1030,49 @@ function renderInvestments() {
     </div>`;
 }
 
+function purchaseHistorySection(inv) {
+  const purchases = state.investmentPurchases.filter(p=>p.investmentId===inv.id)
+    .sort((a,b)=>a.date.localeCompare(b.date));
+  const totalShares = purchases.reduce((a,p)=>a+p.shares,0);
+  const weightedAvg = totalShares>0 ? purchases.reduce((a,p)=>a+p.shares*p.priceUSD,0)/totalShares : 0;
+  const livePrice   = inv.marketPrice || 0;
+
+  const rows = purchases.map(p=>{
+    const lotVal = livePrice>0 ? p.shares*livePrice*state.usdCopRate : 0;
+    const lotPnl = lotVal - p.amountCOP;
+    const lotPct = p.amountCOP>0 ? (lotPnl/p.amountCOP*100) : 0;
+    return `
+      <div class="ph-row">
+        <span class="ph-date">${dateStr(p.date)}</span>
+        <span class="ph-shares">${p.shares} acc.</span>
+        <span class="ph-price">${formatUSD(p.priceUSD)}</span>
+        <span class="ph-cop">${formatCOP(p.amountCOP)}</span>
+        ${livePrice>0?`<span class="ph-pnl ${lotPnl>=0?'profit':'loss'}">${lotPnl>=0?'+':''}${formatCOP(lotPnl)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="ph-container">
+      <div class="ph-header" onclick="togglePurchaseHistory('${inv.id}')">
+        <span>📋 Historial de compras${purchases.length>0?` (${purchases.length})`:''}</span>
+        <span id="ph-arrow-${inv.id}">${purchases.length>0?'▼':'▶'}</span>
+      </div>
+      <div class="ph-list ${purchases.length===0?'hidden':''}" id="ph-${inv.id}">
+        ${purchases.length>0?`
+          <div class="ph-summary">
+            <span>Total: <strong>${totalShares} acc.</strong></span>
+            ${weightedAvg>0?`<span>Precio prom: <strong>${formatUSD(weightedAvg)}</strong></span>`:''}
+            ${livePrice>0&&weightedAvg>0?`<span class="${livePrice>=weightedAvg?'profit':'loss'}">vs actual ${formatUSD(livePrice)} (${((livePrice-weightedAvg)/weightedAvg*100)>=0?'+':''}${((livePrice-weightedAvg)/weightedAvg*100).toFixed(1)}%)</span>`:''}
+          </div>
+          <div class="ph-cols-header">
+            <span>Fecha</span><span>Acciones</span><span>Precio</span><span>COP</span>${livePrice>0?'<span>P&L</span>':''}
+          </div>
+          ${rows}`:'<p class="ph-empty">Sin compras registradas.</p>'}
+        <button class="btn-small" style="margin-top:10px" onclick="openAddPurchaseModal('${inv.id}')">+ Agregar compra</button>
+      </div>
+    </div>`;
+}
+
 function investmentCard(inv) {
   const pnl = inv.currentValue - inv.invested;
   const pct = inv.invested>0?(pnl/inv.invested*100):0;
@@ -953,6 +1121,8 @@ function investmentCard(inv) {
 
       ${inv.notes?`<div class="savings-notes">${inv.notes}</div>`:''}
       ${!inv.shares?`<button class="btn-small" onclick="openUpdateValueModal('${inv.id}')">Actualizar valor manual</button>`:''}
+
+      ${purchaseHistorySection(inv)}
     </div>`;
 }
 
