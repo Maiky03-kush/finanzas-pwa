@@ -860,12 +860,12 @@ function openInvestmentModal() {
         <div style="font-weight:600;margin-bottom:12px;color:var(--text)">📦 Primera compra</div>
         <div class="form-row">
           <div class="form-group" style="margin-bottom:8px">
-            <label class="form-label">Cantidad (fracciones permitidas)</label>
-            <input class="form-input" type="number" id="inv-shares" placeholder="Ej: 0.5 ó 3.25" min="0" step="any" oninput="calcInvestedFromShares()" required>
+            <label class="form-label">Monto invertido (USD)</label>
+            <input class="form-input" type="number" id="inv-amount" placeholder="Ej: 50.00" min="0" step="any" oninput="calcSharesFromAmount()" required>
           </div>
           <div class="form-group" style="margin-bottom:8px">
             <label class="form-label">Precio de entrada (USD)</label>
-            <input class="form-input" type="number" id="inv-purchase-price" placeholder="0.00" min="0" step="any" oninput="calcInvestedFromShares()" required>
+            <input class="form-input" type="number" id="inv-purchase-price" placeholder="Ej: 191.50" min="0" step="any" oninput="calcSharesFromAmount()" required>
           </div>
         </div>
         <div class="calc-hint" id="inv-calc-hint" style="margin-top:4px"></div>
@@ -914,36 +914,33 @@ function selectTicker(symbol, name, exchange, type) {
   }
   document.getElementById('search-results').classList.add('hidden');
 }
-function calcInvestedFromShares() {
-  const shares = Number(document.getElementById('inv-shares')?.value)||0;
+function calcSharesFromAmount() {
+  const amount = Number(document.getElementById('inv-amount')?.value)||0;
   const price  = Number(document.getElementById('inv-purchase-price')?.value)||0;
   const hint   = document.getElementById('inv-calc-hint');
-  const copLabel = document.getElementById('inv-cop-label');
-  if (shares>0 && price>0) {
-    const usd = Math.round(shares * price * 100) / 100;
-    document.getElementById('inv-invested').value = usd;
-    if (hint) hint.textContent = `${shares} × ${formatUSD(price)} = ${formatUSD(usd)} ≈ ${formatCOP(usd * state.usdCopRate)}`;
-    if (copLabel) copLabel.textContent = '(calculado automáticamente)';
-  } else { if (hint) hint.textContent=''; if (copLabel) copLabel.textContent=''; }
+  if (amount>0 && price>0) {
+    const shares = Math.round(amount / price * 1e8) / 1e8;
+    if (hint) hint.textContent = `${formatUSD(amount)} ÷ ${formatUSD(price)} = ${shares} unidades ≈ ${formatCOP(amount * state.usdCopRate)}`;
+  } else if (hint) hint.textContent = '';
 }
 async function submitInvestment(e) {
   e.preventDefault();
-  const shares = Number(document.getElementById('inv-shares').value)||0;
+  const amount = Number(document.getElementById('inv-amount').value)||0;
   const price  = Number(document.getElementById('inv-purchase-price').value)||0;
-  const invested = Math.round(shares * price * 1e8) / 1e8;
+  const shares = price > 0 ? Math.round(amount / price * 1e8) / 1e8 : 0;
   const date   = document.getElementById('inv-date').value || todayISO();
   const inv = {
     name:          document.getElementById('inv-name').value.trim(),
     ticker:        normalizeTicker(document.getElementById('inv-ticker').value.trim()),
     type:          document.getElementById('inv-type').value,
-    invested, currentValue: invested,
+    invested: amount, currentValue: amount,
     shares, purchasePrice: price,
     notes:         document.getElementById('inv-notes').value.trim()
   };
   closeModal();
   await addInvestment(inv);
-  if (shares > 0 && price > 0) {
-    await addInvestmentPurchase({ investmentId:inv.id, date, shares, priceUSD:price, amountUSD:invested });
+  if (amount > 0 && price > 0) {
+    await addInvestmentPurchase({ investmentId:inv.id, date, shares, priceUSD:price, amountUSD:amount });
   }
   if (inv.ticker) { await refreshInvestmentPrices(); renderView(); }
 }
@@ -964,35 +961,33 @@ function openAddPurchaseModal(invId) {
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">Cantidad (fracciones permitidas)</label>
-          <input class="form-input" type="number" id="pur-shares" placeholder="Ej: 0.5 ó 3.25" min="0" step="any" oninput="calcPurchaseAmount()" required>
+          <label class="form-label">Monto invertido (USD)</label>
+          <input class="form-input" type="number" id="pur-amount" placeholder="Ej: 50.00" min="0" step="any" oninput="calcSharesFromPurchase()" required>
         </div>
         <div class="form-group">
-          <label class="form-label">Precio USD</label>
-          <input class="form-input" type="number" id="pur-price" placeholder="0.00" min="0" step="any" value="${inv.marketPrice||inv.purchasePrice||''}" oninput="calcPurchaseAmount()">
+          <label class="form-label">Precio de entrada (USD)</label>
+          <input class="form-input" type="number" id="pur-price" placeholder="0.00" min="0" step="any" value="${inv.marketPrice||inv.purchasePrice||''}" oninput="calcSharesFromPurchase()">
         </div>
       </div>
       <div class="calc-hint" id="pur-calc-hint"></div>
-      <div class="form-group">
-        <label class="form-label">Monto USD</label>
-        <input class="form-input" type="number" id="pur-amount" placeholder="0.00" min="0" step="any" required>
-      </div>
       <button type="submit" class="btn-primary">Registrar compra</button>
     </form>`);
 }
-function calcPurchaseAmount() {
-  const shares = Number(document.getElementById('pur-shares')?.value)||0;
+function calcSharesFromPurchase() {
+  const amount = Number(document.getElementById('pur-amount')?.value)||0;
   const price  = Number(document.getElementById('pur-price')?.value)||0;
   const hint   = document.getElementById('pur-calc-hint');
-  if (shares>0 && price>0) {
-    const usd = Math.round(shares * price * 100) / 100;
-    document.getElementById('pur-amount').value = usd;
-    if (hint) hint.textContent = `${shares} × ${formatUSD(price)} = ${formatUSD(usd)} ≈ ${formatCOP(usd * state.usdCopRate)}`;
-  } else { if (hint) hint.textContent=''; }
+  if (amount>0 && price>0) {
+    const shares = Math.round(amount / price * 1e8) / 1e8;
+    if (hint) hint.textContent = `${formatUSD(amount)} ÷ ${formatUSD(price)} = ${shares} unidades ≈ ${formatCOP(amount * state.usdCopRate)}`;
+  } else if (hint) hint.textContent = '';
 }
 async function submitAddPurchase(e, invId) {
   e.preventDefault();
-  const purchase = { investmentId:invId, date:document.getElementById('pur-date').value, shares:Number(document.getElementById('pur-shares').value)||0, priceUSD:Number(document.getElementById('pur-price').value)||0, amountUSD:Number(document.getElementById('pur-amount').value)||0 };
+  const amount = Number(document.getElementById('pur-amount').value)||0;
+  const price  = Number(document.getElementById('pur-price').value)||0;
+  const shares = price > 0 ? Math.round(amount / price * 1e8) / 1e8 : 0;
+  const purchase = { investmentId:invId, date:document.getElementById('pur-date').value, shares, priceUSD:price, amountUSD:amount };
   closeModal();
   await addInvestmentPurchase(purchase);
   await refreshInvestmentPrices();
