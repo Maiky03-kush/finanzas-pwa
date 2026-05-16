@@ -105,8 +105,9 @@ function getMonthlyHistory(n=6) {
 function getAvgMonthlyIncome()  { const h=getMonthlyHistory().filter(m=>m.income>0);  return h.length?h.reduce((a,m)=>a+m.income,0)/h.length:0; }
 function getAvgMonthlyExpense() { const h=getMonthlyHistory().filter(m=>m.expense>0); return h.length?h.reduce((a,m)=>a+m.expense,0)/h.length:0; }
 function getPortfolioSummary() {
-  const invested = state.investments.reduce((a,i)=>a+Number(i.invested),0);
-  const current  = state.investments.reduce((a,i)=>a+Number(i.currentValue),0);
+  const rate     = state.usdCopRate || 1;
+  const invested = state.investments.reduce((a,i)=>a+Number(i.invested)*rate,0);
+  const current  = state.investments.reduce((a,i)=>a+Number(i.currentValue)*rate,0);
   const pnl = current-invested;
   return { invested, current, pnl, pct: invested?(pnl/invested*100):0 };
 }
@@ -161,8 +162,7 @@ async function refreshInvestmentPrices() {
     // Auto-update currentValue when shares are tracked
     if (Number(inv.shares) > 0) {
       const valueUSD = Number(inv.shares) * q.price;
-      const valueCOP = q.currency === 'USD' ? Math.round(valueUSD * state.usdCopRate) : Math.round(valueUSD);
-      inv.currentValue = valueCOP;
+      inv.currentValue = valueUSD;
       updated = true;
     }
   }
@@ -289,7 +289,7 @@ async function ensureSpreadsheet() {
       { range:'Transacciones!A1:G1', values:[['ID','Fecha','Tipo','Categoría','Descripción','Monto','Pago']] },
       { range:'Ahorro!A1:F1',        values:[['ID','Nombre','Meta','Actual','Fecha Límite','Notas']] },
       { range:'Inversiones!A1:I1',   values:[['ID','Nombre','Ticker','Tipo','Invertido','Valor Actual','Acciones','Precio Compra','Notas']] },
-      { range:'Compras_Inv!A1:F1',   values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoCOP']] }
+      { range:'Compras_Inv!A1:F1',   values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoUSD']] }
     ]}
   });
 }
@@ -327,7 +327,7 @@ async function syncFromSheets() {
       const purResp = await gapi.client.sheets.spreadsheets.values.get({
         spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F'
       });
-      state.investmentPurchases = (purResp.result.values||[]).map(r=>({ id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'', shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountCOP:Number(r[5])||0 })).filter(p=>p.investmentId);
+      state.investmentPurchases = (purResp.result.values||[]).map(r=>({ id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'', shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountUSD:Number(r[5])||0 })).filter(p=>p.investmentId);
     } catch(e) { await ensureComprasInvSheet(); }
     saveLocal();
   } catch(e) { console.error('syncFromSheets', e); }
@@ -411,14 +411,14 @@ async function addInvestmentPurchase(purchase) {
   if (inv) {
     const allP = state.investmentPurchases.filter(p=>p.investmentId===inv.id);
     inv.shares        = allP.reduce((a,p)=>a+p.shares, 0);
-    inv.invested      = allP.reduce((a,p)=>a+p.amountCOP, 0);
+    inv.invested      = allP.reduce((a,p)=>a+p.amountUSD, 0);
     const totalShares = inv.shares;
     inv.purchasePrice = totalShares>0 ? allP.reduce((a,p)=>a+p.shares*p.priceUSD,0)/totalShares : 0;
     if (!inv.ticker) inv.currentValue = inv.invested;
   }
   saveLocal(); renderView();
   try {
-    await appendRow('Compras_Inv',[purchase.id,purchase.investmentId,purchase.date,purchase.shares,purchase.priceUSD,purchase.amountCOP]);
+    await appendRow('Compras_Inv',[purchase.id,purchase.investmentId,purchase.date,purchase.shares,purchase.priceUSD,purchase.amountUSD]);
     if (inv) await updateRowById('Inversiones',inv.id,[inv.id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']);
   } catch(e) {}
 }
@@ -580,11 +580,11 @@ function openInvestmentModal() {
       </div>
 
       <div class="form-group">
-        <label class="form-label">Total invertido (COP) <span id="inv-cop-label" style="color:var(--muted)"></span></label>
-        <input class="form-input" type="number" id="inv-invested" placeholder="0" min="0" required>
+        <label class="form-label">Total invertido (USD) <span id="inv-cop-label" style="color:var(--muted)"></span></label>
+        <input class="form-input" type="number" id="inv-invested" placeholder="0.00" min="0" step="any" required>
       </div>
       <div class="form-group">
-        <label class="form-label">Valor actual (COP) — dejar en blanco si igual al invertido</label>
+        <label class="form-label">Valor actual (USD) — dejar en blanco si igual al invertido</label>
         <input class="form-input" type="number" id="inv-current" placeholder="Igual al invertido">
       </div>
       <div class="form-group">
@@ -636,9 +636,9 @@ function calcInvestedFromShares() {
   const hint   = document.getElementById('inv-calc-hint');
   const copLabel = document.getElementById('inv-cop-label');
   if (shares>0 && price>0) {
-    const cop = Math.round(shares * price * state.usdCopRate);
-    document.getElementById('inv-invested').value = cop;
-    if (hint) hint.textContent = `${shares} × ${formatUSD(price)} × ${Math.round(state.usdCopRate).toLocaleString('es-CO')} COP/USD = ${formatCOP(cop)}`;
+    const usd = Math.round(shares * price * 100) / 100;
+    document.getElementById('inv-invested').value = usd;
+    if (hint) hint.textContent = `${shares} × ${formatUSD(price)} = ${formatUSD(usd)} ≈ ${formatCOP(usd * state.usdCopRate)}`;
     if (copLabel) copLabel.textContent = '(calculado automáticamente)';
   } else { if (hint) hint.textContent=''; if (copLabel) copLabel.textContent=''; }
 }
@@ -657,8 +657,8 @@ async function submitInvestment(e) {
   };
   closeModal();
   await addInvestment(inv);
-  if (shares > 0 && purchasePrice > 0) {
-    await addInvestmentPurchase({ investmentId:inv.id, date:todayISO(), shares, priceUSD:purchasePrice, amountCOP:invested });
+  if (inv.shares > 0 && inv.purchasePrice > 0) {
+    await addInvestmentPurchase({ investmentId:inv.id, date:todayISO(), shares:inv.shares, priceUSD:inv.purchasePrice, amountUSD:invested });
   }
   if (inv.ticker) { await refreshInvestmentPrices(); renderView(); }
 }
@@ -689,8 +689,8 @@ function openAddPurchaseModal(invId) {
       </div>
       <div class="calc-hint" id="pur-calc-hint"></div>
       <div class="form-group">
-        <label class="form-label">Monto COP</label>
-        <input class="form-input" type="number" id="pur-amount" placeholder="0" min="0" required>
+        <label class="form-label">Monto USD</label>
+        <input class="form-input" type="number" id="pur-amount" placeholder="0.00" min="0" step="any" required>
       </div>
       <button type="submit" class="btn-primary">Registrar compra</button>
     </form>`);
@@ -700,14 +700,14 @@ function calcPurchaseAmount() {
   const price  = Number(document.getElementById('pur-price')?.value)||0;
   const hint   = document.getElementById('pur-calc-hint');
   if (shares>0 && price>0) {
-    const cop = Math.round(shares*price*state.usdCopRate);
-    document.getElementById('pur-amount').value = cop;
-    if (hint) hint.textContent = `${shares} × ${formatUSD(price)} × ${Math.round(state.usdCopRate).toLocaleString('es-CO')} = ${formatCOP(cop)}`;
+    const usd = Math.round(shares * price * 100) / 100;
+    document.getElementById('pur-amount').value = usd;
+    if (hint) hint.textContent = `${shares} × ${formatUSD(price)} = ${formatUSD(usd)} ≈ ${formatCOP(usd * state.usdCopRate)}`;
   } else { if (hint) hint.textContent=''; }
 }
 async function submitAddPurchase(e, invId) {
   e.preventDefault();
-  const purchase = { investmentId:invId, date:document.getElementById('pur-date').value, shares:Number(document.getElementById('pur-shares').value)||0, priceUSD:Number(document.getElementById('pur-price').value)||0, amountCOP:Number(document.getElementById('pur-amount').value)||0 };
+  const purchase = { investmentId:invId, date:document.getElementById('pur-date').value, shares:Number(document.getElementById('pur-shares').value)||0, priceUSD:Number(document.getElementById('pur-price').value)||0, amountUSD:Number(document.getElementById('pur-amount').value)||0 };
   closeModal();
   await addInvestmentPurchase(purchase);
   await refreshInvestmentPrices();
@@ -729,8 +729,8 @@ function openUpdateValueModal(id) {
     </div>
     <p style="color:var(--text-secondary);margin-bottom:16px">${inv.name}${inv.ticker?' ('+inv.ticker+')':''}</p>
     <form onsubmit="submitUpdateValue(event,'${id}')">
-      <div class="form-group"><label class="form-label">Nuevo valor actual (COP)</label>
-        <input class="form-input" type="number" id="inv-newval" value="${inv.currentValue}" min="0" required></div>
+      <div class="form-group"><label class="form-label">Nuevo valor actual (USD)</label>
+        <input class="form-input" type="number" id="inv-newval" value="${inv.currentValue}" min="0" step="any" required></div>
       <button type="submit" class="btn-primary">Actualizar</button>
     </form>`);
 }
@@ -860,9 +860,9 @@ function renderDashboard() {
                 const pct = i.invested>0?(pnl/i.invested*100):0;
                 return `<tr>
                   <td><strong>${i.ticker||'—'}</strong> <span style="font-size:12px;color:var(--muted)">${i.name}</span></td>
-                  <td>${formatCOP(i.invested)}</td>
-                  <td>${formatCOP(i.currentValue)}</td>
-                  <td class="${pnl>=0?'col-income':'col-expense'}">${pnl>=0?'+':''}${formatCOP(pnl)}<br><small>${pct>=0?'+':''}${pct.toFixed(1)}%</small></td>
+                  <td>${formatUSD(i.invested)}</td>
+                  <td>${formatUSD(i.currentValue)}</td>
+                  <td class="${pnl>=0?'col-income':'col-expense'}">${pnl>=0?'+':''}${formatUSD(pnl)}<br><small>${pct>=0?'+':''}${pct.toFixed(1)}%</small></td>
                 </tr>`;
               }).join('')}
             </tbody>
@@ -1005,8 +1005,8 @@ function renderInvestments() {
   // Portfolio totals in USD
   let totalInvUSD = 0, totalCurUSD = 0;
   state.investments.forEach(i => {
-    const invUSD = i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : i.invested/state.usdCopRate;
-    const curUSD = i.shares>0&&i.marketPrice ? i.shares*i.marketPrice : i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : i.currentValue/state.usdCopRate;
+    const invUSD = i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : Number(i.invested);
+    const curUSD = i.shares>0&&i.marketPrice ? i.shares*i.marketPrice : i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : Number(i.currentValue);
     totalInvUSD += invUSD; totalCurUSD += curUSD;
   });
   const pnlUSD = totalCurUSD - totalInvUSD;
@@ -1089,17 +1089,17 @@ function investmentCard(inv) {
   const hasShares = inv.shares > 0 && inv.purchasePrice > 0;
 
   // USD calculations
-  const investedUSD = hasShares ? inv.shares * inv.purchasePrice : inv.invested / state.usdCopRate;
+  const investedUSD = hasShares ? inv.shares * inv.purchasePrice : Number(inv.invested);
   const currentUSD  = hasShares && hasLive ? inv.shares * inv.marketPrice
                     : hasShares ? inv.shares * inv.purchasePrice
-                    : inv.currentValue / state.usdCopRate;
+                    : Number(inv.currentValue);
   const pnlUSD = currentUSD - investedUSD;
   const pct    = investedUSD > 0 ? (pnlUSD / investedUSD * 100) : 0;
 
   // Weight in portfolio (use USD)
   let totalCurUSD = 0;
   state.investments.forEach(i => {
-    totalCurUSD += i.shares>0&&i.marketPrice ? i.shares*i.marketPrice : i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : i.currentValue/state.usdCopRate;
+    totalCurUSD += i.shares>0&&i.marketPrice ? i.shares*i.marketPrice : i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : Number(i.currentValue);
   });
   const weight = totalCurUSD > 0 ? (currentUSD / totalCurUSD * 100) : 0;
 
