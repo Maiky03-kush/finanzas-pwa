@@ -188,11 +188,7 @@ async function refreshInvestmentPrices() {
       for (const inv of state.investments) {
         if (inv.ticker && Number(inv.shares) > 0) {
           try {
-            await updateRowById('Inversiones', inv.id, [
-              inv.id, inv.name, inv.ticker||'', inv.type||'',
-              inv.invested, inv.currentValue,
-              inv.shares||0, inv.purchasePrice||0, inv.notes||''
-            ]);
+            await updateRowById('Inversiones', inv.id, invArr(inv));
           } catch(e) {}
         }
       }
@@ -329,7 +325,7 @@ async function ensureSpreadsheet() {
     resource:{ valueInputOption:'RAW', data:[
       { range:'Transacciones!A1:G1', values:[['ID','Fecha','Tipo','Categoría','Descripción','Monto','Pago']] },
       { range:'Ahorro!A1:F1',        values:[['ID','Nombre','Meta','Actual','Fecha Límite','Notas']] },
-      { range:'Inversiones!A1:I1',   values:[['ID','Nombre','Ticker','Tipo','Invertido','Valor Actual','Acciones','Precio Compra','Notas']] },
+      { range:'Inversiones!A1:K1',   values:[['ID','Nombre','Ticker','Tipo','Invertido','Valor Actual','Acciones','Precio Compra','Notas','Ganancia $','Ganancia %']] },
       { range:'Compras_Inv!A1:F1',   values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoUSD']] },
       { range:'Suscripciones!A1:H1', values:[['ID','Nombre','Monto','Moneda','Frecuencia','ProximoPago','Categoria','Notas']] }
     ]}
@@ -516,17 +512,25 @@ async function markSubscriptionPaid(id) {
   try { await updateRowById('Suscripciones',id,[id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); } catch(e) {}
 }
 
+/* ── Investment row helper (includes Ganancia columns) ───── */
+function invArr(inv) {
+  const g = Math.round(((inv.currentValue||0) - (inv.invested||0)) * 100) / 100;
+  const p = (inv.invested||0) > 0 ? Math.round(g / inv.invested * 10000) / 100 : 0;
+  return [inv.id, inv.name, inv.ticker||'', inv.type||'', inv.invested, inv.currentValue,
+          inv.shares||0, inv.purchasePrice||0, inv.notes||'', g, p];
+}
+
 /* ── CRUD: Investments ───────────────────────────────────── */
 async function addInvestment(inv) {
   inv.id = uid();
   if (!inv.currentValue) inv.currentValue = inv.invested;
   state.investments.push(inv); saveLocal(); renderView();
-  try { await appendRow('Inversiones',[inv.id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']); } catch(e) {}
+  try { await appendRow('Inversiones', invArr(inv)); } catch(e) {}
 }
 async function updateInvestmentValue(id, newValue) {
   const inv = state.investments.find(i=>i.id===id); if (!inv) return;
   inv.currentValue = Number(newValue); saveLocal(); renderView();
-  try { await updateRowById('Inversiones',id,[id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']); } catch(e) {}
+  try { await updateRowById('Inversiones', id, invArr(inv)); } catch(e) {}
 }
 async function deleteInvestment(id) {
   const relPurchases = state.investmentPurchases.filter(p=>p.investmentId===id);
@@ -545,7 +549,7 @@ async function addInvestmentPurchase(purchase) {
   const inv = state.investments.find(i=>i.id===purchase.investmentId);
   try {
     await appendRow('Compras_Inv',[purchase.id,purchase.investmentId,purchase.date,purchase.shares,purchase.priceUSD,purchase.amountUSD]);
-    if (inv) await updateRowById('Inversiones',inv.id,[inv.id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']);
+    if (inv) await updateRowById('Inversiones', inv.id, invArr(inv));
   } catch(e) {}
 }
 
@@ -558,7 +562,7 @@ async function deleteInvestmentPurchase(purchaseId) {
   saveLocal(); renderView();
   try { await deleteRowById('Compras_Inv', purchaseId); } catch(e) {}
   const inv = state.investments.find(i=>i.id===invId);
-  if (inv) { try { await updateRowById('Inversiones',inv.id,[inv.id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']); } catch(e) {} }
+  if (inv) { try { await updateRowById('Inversiones', inv.id, invArr(inv)); } catch(e) {} }
 }
 
 function openEditPurchaseModal(purchaseId) {
@@ -617,7 +621,7 @@ async function submitEditPurchase(e, purchaseId) {
   const inv = state.investments.find(i=>i.id===p.investmentId);
   try {
     await updateRowById('Compras_Inv', purchaseId, [purchaseId, p.investmentId, p.date, shares, price, amount]);
-    if (inv) await updateRowById('Inversiones', inv.id, [inv.id, inv.name, inv.ticker||'', inv.type||'', inv.invested, inv.currentValue, inv.shares||0, inv.purchasePrice||0, inv.notes||'']);
+    if (inv) await updateRowById('Inversiones', inv.id, invArr(inv));
   } catch(e) {}
 }
 
@@ -1155,7 +1159,7 @@ async function submitEditInvestment(e, id) {
   inv.notes  = document.getElementById('inv-edit-notes').value.trim();
   closeModal(); saveLocal(); renderView();
   if (!state.accessToken) return;
-  try { await updateRowById('Inversiones',id,[id,inv.name,inv.ticker,inv.type,inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']); } catch(e) {}
+  try { await updateRowById('Inversiones', id, invArr(inv)); } catch(e) {}
 }
 
 /* ── Confirm delete ──────────────────────────────────────── */
