@@ -724,3 +724,50 @@ body {
   font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s;
 }
 .sub-paid-btn:active { background: rgba(52,199,89,.25); }
+
+/* ── Transaction search ───────────────────────────────── */
+.tx-search-wrap {
+  position: relative;
+  margin-bottom: 12px;
+}
+.tx-search-input {
+  width: 100%;
+  padding: 10px 36px 10px 14px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 0.9rem;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color .2s;
+}
+.tx-search-input:focus { border-color: var(--accent); }
+.tx-search-clear {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+/* ── Notification banner ─────────────────────────────── */
+.notif-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  margin-bottom: 12px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.notif-banner span { flex: 1; }

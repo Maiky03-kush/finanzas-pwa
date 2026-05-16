@@ -17,7 +17,7 @@ let state = {
   view: 'dashboard', syncing: false,
   gapiReady: false, gisReady: false, tokenClient: null,
   addType: 'Gasto', addPaymentMethod: 'Efectivo',
-  txFilter: 'Gasto',
+  txFilter: 'Gasto', txSearch: '',
   savingsSubTab: 'goals',
   usdCopRate: 4200,
   priceRefreshTimer: null,
@@ -42,6 +42,7 @@ function saveLocal() {
   if (state.spreadsheetId) localStorage.setItem('finanzas_sheetId', state.spreadsheetId);
   localStorage.setItem('finanzas_inv_purchases', JSON.stringify(state.investmentPurchases));
   localStorage.setItem('finanzas_subscriptions', JSON.stringify(state.subscriptions));
+  localStorage.setItem('finanzas_categories',    JSON.stringify(state.categories));
 }
 
 function loadLocal() {
@@ -52,6 +53,8 @@ function loadLocal() {
     state.investmentPurchases= JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
     state.subscriptions      = JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
     state.spreadsheetId      = localStorage.getItem('finanzas_sheetId') || null;
+    const savedCats = JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
+    if (savedCats) state.categories = savedCats;
   } catch(e) { state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = []; }
 }
 
@@ -162,6 +165,7 @@ async function refreshInvestmentPrices() {
     inv.marketChangePct = q.changePct;
     inv.marketCurrency = q.currency;
     inv.marketName     = q.name;
+    inv.marketExchange = q.exchange;
     // Auto-update currentValue when shares are tracked
     if (Number(inv.shares) > 0) {
       const valueUSD = Number(inv.shares) * q.price;
@@ -400,25 +404,30 @@ async function updateRowById(sheet, id, values) {
 /* ── CRUD: Transactions ──────────────────────────────────── */
 async function addTransaction(tx) {
   tx.id = uid(); state.transactions.unshift(tx); saveLocal(); renderView();
+  if (!state.accessToken) return;
   try { await appendRow('Transacciones',[tx.id,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||'']); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { updateSyncBadge('Error sync','error'); }
 }
 async function deleteTransaction(id) {
   state.transactions = state.transactions.filter(t=>t.id!==id); saveLocal(); renderView();
+  if (!state.accessToken) return;
   try { await deleteRowById('Transacciones',id); } catch(e) {}
 }
 
 /* ── CRUD: Savings ───────────────────────────────────────── */
 async function addSavingsGoal(goal) {
   goal.id = uid(); goal.current = 0; state.savings.push(goal); saveLocal(); renderView();
+  if (!state.accessToken) return;
   try { await appendRow('Ahorro',[goal.id,goal.name,goal.goal,0,goal.deadline,goal.notes||'']); } catch(e) {}
 }
 async function updateSavingsProgress(id, addAmount) {
   const g = state.savings.find(s=>s.id===id); if (!g) return;
   g.current = Math.min(g.current+Number(addAmount), g.goal); saveLocal(); renderView();
+  if (!state.accessToken) return;
   try { await updateRowById('Ahorro',id,[id,g.name,g.goal,g.current,g.deadline,g.notes||'']); } catch(e) {}
 }
 async function deleteSavingsGoal(id) {
   state.savings = state.savings.filter(s=>s.id!==id); saveLocal(); renderView();
+  if (!state.accessToken) return;
   try { await deleteRowById('Ahorro',id); } catch(e) {}
 }
 
@@ -468,16 +477,19 @@ function subIcon(cat) {
 async function addSubscription(sub) {
   sub.id = uid();
   state.subscriptions.push(sub); saveLocal(); renderView();
+  if (!state.accessToken) return;
   try { await appendRow('Suscripciones',[sub.id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); } catch(e) {}
 }
 async function deleteSubscription(id) {
   state.subscriptions = state.subscriptions.filter(s=>s.id!==id); saveLocal(); renderView();
+  if (!state.accessToken) return;
   try { await deleteRowById('Suscripciones',id); } catch(e) {}
 }
 async function markSubscriptionPaid(id) {
   const sub = state.subscriptions.find(s=>s.id===id); if (!sub) return;
   sub.nextPaymentDate = calcNextPaymentDate(sub.frequency, todayISO());
   saveLocal(); renderView();
+  if (!state.accessToken) return;
   try { await updateRowById('Suscripciones',id,[id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); } catch(e) {}
 }
 
@@ -552,13 +564,15 @@ function openTransactionModal(tx) {
       </div>
       <div class="form-group">
         <label class="form-label">Categoría</label>
-        <select class="form-input" id="tx-cat">
+        <select class="form-input" id="tx-cat" onchange="handleCatChange(this)">
           ${cats.map(c=>`<option value="${c}" ${tx?.category===c?'selected':''}>${catIcon(c)} ${c}</option>`).join('')}
+          <option value="__nueva__">✏️ Nueva categoría…</option>
         </select>
+        <input class="form-input" type="text" id="tx-cat-custom" placeholder="Nombre de la nueva categoría" style="display:none;margin-top:8px">
       </div>
       <div class="form-group">
         <label class="form-label">Descripción</label>
-        <input class="form-input" type="text" id="tx-desc" placeholder="Ej: Gasolina" value="${tx?.description||''}" required>
+        <input class="form-input" type="text" id="tx-desc" placeholder="${type==='Gasto'?'Ej: Gasolina':'Ej: Salario mensual'}" value="${tx?.description||''}" required>
       </div>
       <div class="form-group">
         <label class="form-label">Monto (COP)</label>
@@ -578,11 +592,25 @@ function openTransactionModal(tx) {
     </form>`);
 }
 function switchModalType(type) { state.addType=type; state.addPaymentMethod='Efectivo'; openTransactionModal(); }
+function handleCatChange(sel) {
+  const custom = document.getElementById('tx-cat-custom');
+  if (custom) custom.style.display = sel.value==='__nueva__' ? 'block' : 'none';
+}
 function switchPayMethod(method) { state.addPaymentMethod=method; document.querySelectorAll('.pay-btn').forEach(b=>b.classList.toggle('active',b.textContent.includes(method))); }
 async function submitTransaction(e, editId) {
   e.preventDefault();
   const paymentMethod = state.addPaymentMethod;
-  const tx = { date:document.getElementById('tx-date').value, type:state.addType, category:document.getElementById('tx-cat').value, description:document.getElementById('tx-desc').value.trim(), amount:Number(document.getElementById('tx-amount').value), paymentMethod };
+  let category = document.getElementById('tx-cat').value;
+  if (category === '__nueva__') {
+    const custom = document.getElementById('tx-cat-custom')?.value.trim();
+    if (!custom) { alert('Escribe el nombre de la nueva categoría.'); return; }
+    category = custom;
+    if (!state.categories[state.addType].includes(category)) {
+      state.categories[state.addType].push(category);
+      saveLocal();
+    }
+  }
+  const tx = { date:document.getElementById('tx-date').value, type:state.addType, category, description:document.getElementById('tx-desc').value.trim(), amount:Number(document.getElementById('tx-amount').value), paymentMethod };
   closeModal();
   if (editId) {
     const idx = state.transactions.findIndex(t=>t.id===editId);
@@ -637,6 +665,31 @@ async function submitProgress(e, id) {
   e.preventDefault();
   const amt = Number(document.getElementById('prog-amount').value);
   closeModal(); await updateSavingsProgress(id, amt);
+}
+function openEditSavingsModal(s) {
+  openModal(`
+    <div class="modal-header">
+      <h2 class="modal-title">Editar Meta</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form onsubmit="submitEditSavings(event,'${s.id}')">
+      <div class="form-group"><label class="form-label">Nombre</label><input class="form-input" type="text" id="sv-edit-name" value="${s.name}" required></div>
+      <div class="form-group"><label class="form-label">Meta (COP)</label><input class="form-input" type="number" id="sv-edit-goal" value="${s.goal}" min="1" required></div>
+      <div class="form-group"><label class="form-label">Fecha límite</label><input class="form-input" type="date" id="sv-edit-deadline" value="${s.deadline||''}"></div>
+      <div class="form-group"><label class="form-label">Notas</label><input class="form-input" type="text" id="sv-edit-notes" value="${s.notes||''}"></div>
+      <button type="submit" class="btn-primary">Guardar cambios</button>
+    </form>`);
+}
+async function submitEditSavings(e, id) {
+  e.preventDefault();
+  const s = state.savings.find(s=>s.id===id); if (!s) return;
+  s.name     = document.getElementById('sv-edit-name').value.trim();
+  s.goal     = Number(document.getElementById('sv-edit-goal').value);
+  s.deadline = document.getElementById('sv-edit-deadline').value;
+  s.notes    = document.getElementById('sv-edit-notes').value.trim();
+  closeModal(); saveLocal(); renderView();
+  if (!state.accessToken) return;
+  try { await updateRowById('Ahorro',id,[id,s.name,s.goal,s.current,s.deadline,s.notes||'']); } catch(e) {}
 }
 
 /* ── Subscription Modal ──────────────────────────────────── */
@@ -967,6 +1020,48 @@ async function submitUpdateValue(e, id) {
   const val = Number(document.getElementById('inv-newval').value);
   closeModal(); await updateInvestmentValue(id, val);
 }
+function openEditInvestmentModal(inv) {
+  const types = ['Acciones','ETF','Criptomoneda','Fondo de inversión','Bonos','CDT','Otro'];
+  openModal(`
+    <div class="modal-header">
+      <h2 class="modal-title">Editar Inversión</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form onsubmit="submitEditInvestment(event,'${inv.id}')">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Ticker</label>
+          <input class="form-input" type="text" id="inv-edit-ticker" value="${inv.ticker||''}" style="text-transform:uppercase">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Nombre</label>
+          <input class="form-input" type="text" id="inv-edit-name" value="${inv.name||''}" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Tipo</label>
+        <select class="form-input" id="inv-edit-type">
+          ${types.map(t=>`<option value="${t}" ${inv.type===t?'selected':''}>${t}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notas</label>
+        <input class="form-input" type="text" id="inv-edit-notes" value="${inv.notes||''}">
+      </div>
+      <button type="submit" class="btn-primary">Guardar cambios</button>
+    </form>`);
+}
+async function submitEditInvestment(e, id) {
+  e.preventDefault();
+  const inv = state.investments.find(i=>i.id===id); if (!inv) return;
+  inv.ticker = document.getElementById('inv-edit-ticker').value.trim().toUpperCase();
+  inv.name   = document.getElementById('inv-edit-name').value.trim();
+  inv.type   = document.getElementById('inv-edit-type').value;
+  inv.notes  = document.getElementById('inv-edit-notes').value.trim();
+  closeModal(); saveLocal(); renderView();
+  if (!state.accessToken) return;
+  try { await updateRowById('Inversiones',id,[id,inv.name,inv.ticker,inv.type,inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']); } catch(e) {}
+}
 
 /* ── Confirm delete ──────────────────────────────────────── */
 function confirmDelete(entity, id) {
@@ -1134,6 +1229,7 @@ function renderDashboard() {
    VIEW: TRANSACTIONS (toggle Gastos / Ingresos)
    ════════════════════════════════════════════════════════════ */
 function setTxFilter(type) { state.txFilter = type; renderTransactions(); }
+function setTxSearch(val) { state.txSearch = val; renderTransactions(); }
 
 function renderTransactions() {
   const filter   = state.txFilter;
@@ -1141,7 +1237,11 @@ function renderTransactions() {
   const allIngreso= state.transactions.filter(t=>t.type==='Ingreso');
   const totalGasto  = allGasto.reduce((a,t)=>a+Number(t.amount),0);
   const totalIngreso= allIngreso.reduce((a,t)=>a+Number(t.amount),0);
-  const filtered = filter==='Gasto' ? allGasto : allIngreso;
+  const filtered = (filter==='Gasto' ? allGasto : allIngreso).filter(t =>
+    !state.txSearch ||
+    t.description.toLowerCase().includes(state.txSearch.toLowerCase()) ||
+    t.category.toLowerCase().includes(state.txSearch.toLowerCase())
+  );
 
   // Group by month
   const groups = {};
@@ -1156,6 +1256,11 @@ function renderTransactions() {
 
   document.getElementById('app-content').innerHTML = `
     <div class="content-inner">
+      <!-- Búsqueda -->
+      <div class="tx-search-wrap">
+        <input class="tx-search-input" type="text" placeholder="🔍 Buscar por descripción o categoría…" value="${state.txSearch}" oninput="setTxSearch(this.value)">
+        ${state.txSearch ? `<button class="tx-search-clear" onclick="setTxSearch('')">✕</button>` : ''}
+      </div>
       <!-- Toggle Gastos / Ingresos -->
       <div class="tx-type-tabs">
         <button class="tx-tab ${filter==='Gasto'?'active-tab expense-tab':''}" onclick="setTxFilter('Gasto')">
@@ -1245,12 +1350,17 @@ function renderSavings() {
         <div class="balance-card" style="background:linear-gradient(135deg,#AF52DE,#7B2FBE)">
           <div class="balance-label">Gasto mensual en suscripciones</div>
           <div class="balance-amount">${formatCOP(monthlySubs)}</div>
-          <div class="balance-sub">${state.subscriptions.length} suscripción${state.subscriptions.length!==1?'es':''} · ${upcoming7} por vencer en 7 días</div>
+          <div class="balance-sub">${state.subscriptions.length!==1?state.subscriptions.length+' suscripciones':'1 suscripción'} · ${upcoming7} por vencer en 7 días</div>
         </div>
         <div class="section-header">
           <span class="section-title">Mis suscripciones</span>
           <button class="section-link" onclick="openSubscriptionModal()">+ Nueva</button>
         </div>
+        ${Notification.permission !== 'granted' ? `
+        <div class="notif-banner">
+          <span>🔔 Activa recordatorios para recibir alertas un día antes de cada cobro.</span>
+          <button class="btn-small" onclick="enableNotifications()">Activar</button>
+        </div>` : ''}
         ${state.subscriptions.length===0
           ? `<p class="empty-state">Sin suscripciones registradas.<br>Toca + para agregar.</p>`
           : state.subscriptions
@@ -1270,7 +1380,10 @@ function savingsCard(s) {
           <div class="savings-name">🎯 ${s.name}</div>
           ${s.deadline?`<div class="savings-deadline">${daysLeft!==null&&daysLeft>=0?daysLeft+' días restantes':'Vencida'} · ${dateStr(s.deadline)}</div>`:''}
         </div>
-        <button class="action-btn danger" onclick="confirmDelete('savings','${s.id}')">🗑️</button>
+        <div style="display:flex;gap:4px">
+          <button class="action-btn" onclick='openEditSavingsModal(${JSON.stringify(s)})'>✏️</button>
+          <button class="action-btn danger" onclick="confirmDelete('savings','${s.id}')">🗑️</button>
+        </div>
       </div>
       <div class="savings-amounts">${formatCOP(s.current)}<span class="savings-goal"> / ${formatCOP(s.goal)}</span></div>
       <div class="progress-bar large"><div class="progress-fill" style="width:${pct.toFixed(1)}%"></div></div>
@@ -1400,7 +1513,10 @@ function investmentCard(inv) {
           </div>
           <div class="inv-type">${inv.type} · ${weight.toFixed(1)}% del portafolio${inv.shares?` · ${inv.shares} acciones`:''}</div>
         </div>
-        <button class="action-btn danger" onclick="confirmDelete('inv','${inv.id}')">🗑️</button>
+        <div style="display:flex;gap:4px">
+          <button class="action-btn" onclick='openEditInvestmentModal(${JSON.stringify({id:inv.id,name:inv.name,ticker:inv.ticker,type:inv.type,notes:inv.notes})})'>✏️</button>
+          <button class="action-btn danger" onclick="confirmDelete('inv','${inv.id}')">🗑️</button>
+        </div>
       </div>
 
       ${hasLive ? `
@@ -1410,7 +1526,7 @@ function investmentCard(inv) {
             ${changeUp?'▲':'▼'} ${Math.abs(inv.marketChangePct||0).toFixed(2)}%
             (${changeUp?'+':''}${formatUSD(inv.marketChange||0)})
           </span>
-          <span class="live-label">NYSE · Precio en vivo</span>
+          <span class="live-label">${inv.marketExchange||'Mercado'} · Precio en vivo</span>
         </div>
       ` : inv.ticker ? `<div class="live-price-row"><span style="color:var(--muted);font-size:13px">⏳ Cargando precio para ${inv.ticker}…</span></div>` : ''}
 
@@ -1504,5 +1620,65 @@ function renderProjection() {
     </div>`;
 }
 
+/* ════════════════════════════════════════════════════════════
+   WEB NOTIFICATIONS — recordatorios de suscripciones
+   ════════════════════════════════════════════════════════════ */
+async function requestNotifPermission() {
+  if (!('Notification' in window)) return false;
+  if (Notification.permission === 'granted') return true;
+  if (Notification.permission === 'denied') return false;
+  const result = await Notification.requestPermission();
+  return result === 'granted';
+}
+
+function checkSubscriptionNotifications() {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const today = todayISO();
+  const tomorrow = (() => { const d = new Date(today+'T00:00:00'); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); })();
+
+  state.subscriptions.forEach(sub => {
+    const days = subDaysUntil(sub.nextPaymentDate);
+    if (days > 1) return; // solo hoy, mañana o vencidas
+
+    const notifKey = `notif_${sub.id}_${sub.nextPaymentDate}`;
+    if (localStorage.getItem(notifKey)) return; // ya notificada
+
+    const amtStr = sub.currency==='USD' ? formatUSD(sub.amount) : formatCOP(sub.amount);
+    let title, body;
+    if (days < 0) {
+      title = '⚠️ Suscripción vencida';
+      body  = `${sub.name} — pago pendiente de ${amtStr}`;
+    } else if (days === 0) {
+      title = '🔴 Cobro hoy';
+      body  = `${sub.name} se cobra hoy por ${amtStr}`;
+    } else {
+      title = '⏰ Cobro mañana';
+      body  = `${sub.name} se cobra mañana por ${amtStr}`;
+    }
+
+    try {
+      new Notification(title, { body, icon: '/icon-192.png', tag: notifKey, renotify: false });
+      localStorage.setItem(notifKey, '1');
+    } catch(e) {}
+  });
+}
+
+async function enableNotifications() {
+  const granted = await requestNotifPermission();
+  if (granted) {
+    checkSubscriptionNotifications();
+    renderView();
+  } else {
+    alert('No se pudo activar las notificaciones. Revisa los permisos del navegador para este sitio.');
+  }
+}
+
 /* ── Boot ────────────────────────────────────────────────── */
-window.addEventListener('DOMContentLoaded', () => { loadLocal(); renderView(); });
+window.addEventListener('DOMContentLoaded', () => {
+  loadLocal();
+  renderView();
+  // Chequear notificaciones si ya tienen permiso
+  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+    checkSubscriptionNotifications();
+  }
+});
