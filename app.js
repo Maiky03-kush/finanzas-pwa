@@ -524,20 +524,36 @@ async function deleteInvestment(id) {
 async function addInvestmentPurchase(purchase) {
   purchase.id = uid();
   state.investmentPurchases.push(purchase);
-  const inv = state.investments.find(i=>i.id===purchase.investmentId);
-  if (inv) {
-    const allP = state.investmentPurchases.filter(p=>p.investmentId===inv.id);
-    inv.shares        = allP.reduce((a,p)=>a+p.shares, 0);
-    inv.invested      = allP.reduce((a,p)=>a+p.amountUSD, 0);
-    const totalShares = inv.shares;
-    inv.purchasePrice = totalShares>0 ? allP.reduce((a,p)=>a+p.shares*p.priceUSD,0)/totalShares : 0;
-    if (!inv.ticker) inv.currentValue = inv.invested;
-  }
+  recalcInvestment(purchase.investmentId);
   saveLocal(); renderView();
+  const inv = state.investments.find(i=>i.id===purchase.investmentId);
   try {
     await appendRow('Compras_Inv',[purchase.id,purchase.investmentId,purchase.date,purchase.shares,purchase.priceUSD,purchase.amountUSD]);
     if (inv) await updateRowById('Inversiones',inv.id,[inv.id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']);
   } catch(e) {}
+}
+
+async function deleteInvestmentPurchase(purchaseId) {
+  const purchase = state.investmentPurchases.find(p=>p.id===purchaseId);
+  if (!purchase) return;
+  const invId = purchase.investmentId;
+  state.investmentPurchases = state.investmentPurchases.filter(p=>p.id!==purchaseId);
+  recalcInvestment(invId);
+  saveLocal(); renderView();
+  try { await deleteRowById('Compras_Inv', purchaseId); } catch(e) {}
+  const inv = state.investments.find(i=>i.id===invId);
+  if (inv) { try { await updateRowById('Inversiones',inv.id,[inv.id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']); } catch(e) {} }
+}
+
+function recalcInvestment(invId) {
+  const inv = state.investments.find(i=>i.id===invId);
+  if (!inv) return;
+  const allP = state.investmentPurchases.filter(p=>p.investmentId===invId);
+  inv.shares    = allP.reduce((a,p)=>a+p.shares, 0);
+  inv.invested  = allP.reduce((a,p)=>a+p.amountUSD, 0);
+  const totalSh = inv.shares;
+  inv.purchasePrice = totalSh>0 ? allP.reduce((a,p)=>a+p.shares*p.priceUSD,0)/totalSh : 0;
+  if (!inv.ticker) inv.currentValue = inv.invested;
 }
 
 /* ── Modal ───────────────────────────────────────────────── */
@@ -927,7 +943,9 @@ async function submitInvestment(e) {
   e.preventDefault();
   const amount = Number(document.getElementById('inv-amount').value)||0;
   const price  = Number(document.getElementById('inv-purchase-price').value)||0;
-  const shares = price > 0 ? Math.round(amount / price * 1e8) / 1e8 : 0;
+  if (amount <= 0) { alert('Ingresa el monto invertido.'); return; }
+  if (price  <= 0) { alert('Ingresa el precio de entrada para calcular las unidades.'); return; }
+  const shares = Math.round(amount / price * 1e8) / 1e8;
   const date   = document.getElementById('inv-date').value || todayISO();
   const inv = {
     name:          document.getElementById('inv-name').value.trim(),
@@ -986,7 +1004,9 @@ async function submitAddPurchase(e, invId) {
   e.preventDefault();
   const amount = Number(document.getElementById('pur-amount').value)||0;
   const price  = Number(document.getElementById('pur-price').value)||0;
-  const shares = price > 0 ? Math.round(amount / price * 1e8) / 1e8 : 0;
+  if (amount <= 0) { alert('Ingresa el monto invertido.'); return; }
+  if (price  <= 0) { alert('Ingresa el precio de entrada.'); return; }
+  const shares = Math.round(amount / price * 1e8) / 1e8;
   const purchase = { investmentId:invId, date:document.getElementById('pur-date').value, shares, priceUSD:price, amountUSD:amount };
   closeModal();
   await addInvestmentPurchase(purchase);
@@ -1463,8 +1483,9 @@ function purchaseHistorySection(inv) {
         <span class="ph-date">${dateStr(p.date)}</span>
         <span class="ph-shares">${p.shares} ${unitLabel}</span>
         <span class="ph-price">${formatUSD(p.priceUSD)}</span>
-        <span class="ph-usd">${formatUSD(costUSD)}</span>
+        <span class="ph-usd">${formatUSD(p.amountUSD||costUSD)}</span>
         ${livePrice>0?`<span class="ph-pnl ${lotPnlUSD>=0?'profit':'loss'}">${lotPnlUSD>=0?'+':''}${formatUSD(lotPnlUSD)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
+        <button class="ph-del-btn" onclick="deleteInvestmentPurchase('${p.id}')" title="Eliminar lote">🗑️</button>
       </div>`;
   }).join('');
 
@@ -1501,8 +1522,10 @@ function investmentCard(inv) {
   const totalShPur  = purchases.reduce((a,p)=>a+p.shares,0);
   const avgCost     = totalShPur>0 ? purchases.reduce((a,p)=>a+p.shares*p.priceUSD,0)/totalShPur : (inv.purchasePrice||0);
   const investedUSD = purchases.length>0 ? purchases.reduce((a,p)=>a+p.amountUSD,0) : (hasShares ? inv.shares * inv.purchasePrice : Number(inv.invested));
-  const currentUSD  = hasShares && hasLive ? inv.shares * inv.marketPrice
-                    : hasShares ? inv.shares * (avgCost||inv.purchasePrice)
+  // If we have live price + shares → use market value. If shares=0 but invested > 0 → use invested as base until user fixes data
+  const currentUSD  = hasShares && hasLive && inv.shares > 0 ? inv.shares * inv.marketPrice
+                    : hasShares && inv.shares > 0 ? inv.shares * (avgCost||inv.purchasePrice)
+                    : investedUSD > 0 ? investedUSD
                     : Number(inv.currentValue);
   const pnlUSD = currentUSD - investedUSD;
   const pct    = investedUSD > 0 ? (pnlUSD / investedUSD * 100) : 0;
