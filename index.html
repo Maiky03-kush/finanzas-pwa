@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#007AFF">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Finanzas">
+  <title>Finanzas App</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- HEADER -->
+  <header class="app-header">
+    <div class="header-left">
+      <span class="app-logo">💰</span>
+      <div>
+        <h1 class="app-title">Finanzas</h1>
+        <span id="sync-badge" class="sync-badge">Local</span>
+      </div>
+    </div>
+    <button id="auth-btn" class="auth-btn" onclick="toggleAuth()">Conectar Google</button>
+  </header>
+
+  <!-- BOTTOM NAV -->
+  <nav class="bottom-nav">
+    <button class="nav-item active" data-view="dashboard" onclick="navigate('dashboard')">
+      <span class="nav-icon">📊</span>
+      <span class="nav-label">Inicio</span>
+    </button>
+    <button class="nav-item" data-view="transactions" onclick="navigate('transactions')">
+      <span class="nav-icon">💳</span>
+      <span class="nav-label">Gastos</span>
+    </button>
+    <button class="nav-item" data-view="savings" onclick="navigate('savings')">
+      <span class="nav-icon">🎯</span>
+      <span class="nav-label">Ahorro</span>
+    </button>
+    <button class="nav-item" data-view="investments" onclick="navigate('investments')">
+      <span class="nav-icon">📈</span>
+      <span class="nav-label">Inversiones</span>
+    </button>
+    <button class="nav-item" data-view="projection" onclick="navigate('projection')">
+      <span class="nav-icon">🔮</span>
+      <span class="nav-label">Flujo</span>
+    </button>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <main id="app-content" class="app-main"></main>
+
+  <!-- FAB -->
+  <button class="fab" onclick="openAddModal()" title="Agregar transacción">+</button>
+
+  <!-- MODAL -->
+  <div id="modal-overlay" class="modal-overlay hidden" onclick="handleOverlayClick(event)">
+    <div class="modal-card" onclick="event.stopPropagation()">
+      <div id="modal-content"></div>
+    </div>
+  </div>
+
+  <!-- Google scripts — cargados DESPUÉS de app.js para que los callbacks estén disponibles -->
+  <script src="app.js"></script>
+  <script src="https://accounts.google.com/gsi/client" onload="gisLoaded()" async defer></script>
+  <script src="https://apis.google.com/js/api.js" onload="gapiLoaded()" async defer></script>
+</body>
+</html>

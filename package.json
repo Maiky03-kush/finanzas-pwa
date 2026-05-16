@@ -1,0 +1,12 @@
+{
+  "name": "finanzas-pwa",
+  "version": "1.0.0",
+  "description": "PWA de finanzas personales con sincronización a Google Sheets",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
