@@ -667,3 +667,60 @@ body {
 .ph-empty { font-size: 13px; color: var(--muted); margin: 8px 0; }
 
 .balance-cop-equiv { font-size: 15px; color: rgba(255,255,255,.6); margin: 2px 0 6px; letter-spacing: .2px; }
+
+/* ─── SAVINGS TABS ─── */
+.savings-tabs {
+  display: flex; gap: 0; margin-bottom: 16px;
+  background: var(--card); border-radius: 16px;
+  border: 1px solid var(--border); overflow: hidden;
+  box-shadow: var(--shadow);
+}
+.savings-tab {
+  flex: 1; padding: 14px 12px; border: none; background: none;
+  cursor: pointer; font-size: 14px; font-weight: 600; color: var(--muted);
+  transition: all .2s; border-right: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+}
+.savings-tab:last-child { border-right: none; }
+.savings-tab.active { background: var(--bg); color: var(--text); }
+.tab-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; border-radius: 9px; padding: 0 5px;
+  background: var(--border); color: var(--muted); font-size: 11px; font-weight: 700;
+}
+.tab-badge.urgent { background: rgba(255,59,48,.15); color: var(--red); }
+
+/* ─── SUBSCRIPTION CARD ─── */
+.sub-card {
+  background: var(--card); border-radius: var(--radius);
+  padding: 16px 18px; box-shadow: var(--shadow);
+  border: 1px solid var(--border); margin-bottom: 12px;
+}
+.sub-card.sub-overdue { border-color: rgba(255,59,48,.4); background: rgba(255,59,48,.04); }
+.sub-card.sub-urgent  { border-color: rgba(255,59,48,.25); }
+.sub-card.sub-soon    { border-color: rgba(255,149,0,.3); }
+.sub-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+.sub-icon-name { display: flex; align-items: center; gap: 10px; }
+.sub-icon-badge { font-size: 28px; line-height: 1; }
+.sub-name { font-size: 16px; font-weight: 700; }
+.sub-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.sub-actions-row { display: flex; gap: 4px; }
+.sub-body {
+  display: flex; justify-content: space-between; align-items: flex-end;
+  padding: 12px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+.sub-amount-val { font-size: 20px; font-weight: 700; }
+.sub-monthly-val { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.sub-next-block { text-align: right; }
+.sub-next-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.sub-next-date { font-size: 14px; font-weight: 600; margin-top: 2px; }
+.sub-days { font-size: 12px; margin-top: 3px; color: var(--muted); }
+.sub-days.sub-overdue, .sub-days.sub-urgent { color: var(--red); font-weight: 600; }
+.sub-days.sub-soon { color: var(--orange); font-weight: 600; }
+.sub-paid-btn {
+  width: 100%; padding: 10px; border: none; border-radius: 10px;
+  background: rgba(52,199,89,.12); color: var(--green);
+  font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s;
+}
+.sub-paid-btn:active { background: rgba(52,199,89,.25); }

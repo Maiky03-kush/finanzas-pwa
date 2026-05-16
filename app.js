@@ -13,10 +13,12 @@ const CONFIG = {
 let state = {
   user: null, accessToken: null, spreadsheetId: null,
   transactions: [], savings: [], investments: [], investmentPurchases: [],
+  subscriptions: [],
   view: 'dashboard', syncing: false,
   gapiReady: false, gisReady: false, tokenClient: null,
   addType: 'Gasto', addPaymentMethod: 'Efectivo',
   txFilter: 'Gasto',
+  savingsSubTab: 'goals',
   usdCopRate: 4200,
   priceRefreshTimer: null,
   pricesLastUpdated: null,
@@ -35,11 +37,11 @@ if ('serviceWorker' in navigator) {
 function saveLocal() {
   localStorage.setItem('finanzas_transactions', JSON.stringify(state.transactions));
   localStorage.setItem('finanzas_savings',      JSON.stringify(state.savings));
-  // Strip runtime market data before saving
   const invToSave = state.investments.map(({ marketPrice, marketChange, marketChangePct, marketCurrency, ...rest }) => rest);
   localStorage.setItem('finanzas_investments',  JSON.stringify(invToSave));
   if (state.spreadsheetId) localStorage.setItem('finanzas_sheetId', state.spreadsheetId);
   localStorage.setItem('finanzas_inv_purchases', JSON.stringify(state.investmentPurchases));
+  localStorage.setItem('finanzas_subscriptions', JSON.stringify(state.subscriptions));
 }
 
 function loadLocal() {
@@ -48,8 +50,9 @@ function loadLocal() {
     state.savings            = JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
     state.investments        = JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
     state.investmentPurchases= JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
+    state.subscriptions      = JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
     state.spreadsheetId      = localStorage.getItem('finanzas_sheetId') || null;
-  } catch(e) { state.transactions = []; state.savings = []; state.investments = []; }
+  } catch(e) { state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = []; }
 }
 
 /* ── Formatters ──────────────────────────────────────────── */
@@ -219,11 +222,20 @@ function gisLoaded() {
   });
   state.gisReady = true; checkReady();
 }
-function checkReady() { if (state.gapiReady && state.gisReady) { loadLocal(); renderView(); } }
+function checkReady() {
+  if (state.gapiReady && state.gisReady) {
+    loadLocal();
+    renderView();
+    if (localStorage.getItem('finanzas_wasConnected') && state.tokenClient) {
+      state.tokenClient.requestAccessToken({ prompt: '' });
+    }
+  }
+}
 
 async function handleTokenResponse(resp) {
   if (resp.error) { console.error(resp); return; }
   state.accessToken = resp.access_token;
+  localStorage.setItem('finanzas_wasConnected', '1');
   updateAuthUI(true);
   updateSyncBadge('Sincronizando…','syncing');
   await ensureSpreadsheet();
@@ -235,6 +247,7 @@ function toggleAuth() {
   if (state.accessToken) {
     google.accounts.oauth2.revoke(state.accessToken, ()=>{});
     state.accessToken = null; state.user = null;
+    localStorage.removeItem('finanzas_wasConnected');
     updateAuthUI(false); updateSyncBadge('Local'); renderView();
   } else {
     if (!state.tokenClient) { alert('Google aún no cargó, espera un segundo.'); return; }
@@ -278,7 +291,8 @@ async function ensureSpreadsheet() {
   const createResp = await gapi.client.sheets.spreadsheets.create({
     resource:{ properties:{title:CONFIG.SHEET_NAME}, sheets:[
       {properties:{title:'Transacciones'}},{properties:{title:'Ahorro'}},
-      {properties:{title:'Inversiones'}},{properties:{title:'Compras_Inv'}}
+      {properties:{title:'Inversiones'}},{properties:{title:'Compras_Inv'}},
+      {properties:{title:'Suscripciones'}}
     ]}
   });
   state.spreadsheetId = createResp.result.spreadsheetId;
@@ -289,9 +303,28 @@ async function ensureSpreadsheet() {
       { range:'Transacciones!A1:G1', values:[['ID','Fecha','Tipo','Categoría','Descripción','Monto','Pago']] },
       { range:'Ahorro!A1:F1',        values:[['ID','Nombre','Meta','Actual','Fecha Límite','Notas']] },
       { range:'Inversiones!A1:I1',   values:[['ID','Nombre','Ticker','Tipo','Invertido','Valor Actual','Acciones','Precio Compra','Notas']] },
-      { range:'Compras_Inv!A1:F1',   values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoUSD']] }
+      { range:'Compras_Inv!A1:F1',   values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoUSD']] },
+      { range:'Suscripciones!A1:H1', values:[['ID','Nombre','Monto','Moneda','Frecuencia','ProximoPago','Categoria','Notas']] }
     ]}
   });
+}
+
+async function ensureSuscripcionesSheet() {
+  if (!state.spreadsheetId) return;
+  try {
+    const meta = await gapi.client.sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
+    const exists = meta.result.sheets.some(s=>s.properties.title==='Suscripciones');
+    if (!exists) {
+      await gapi.client.sheets.spreadsheets.batchUpdate({
+        spreadsheetId:state.spreadsheetId,
+        resource:{requests:[{addSheet:{properties:{title:'Suscripciones'}}}]}
+      });
+      await gapi.client.sheets.spreadsheets.values.update({
+        spreadsheetId:state.spreadsheetId, range:'Suscripciones!A1:H1',
+        valueInputOption:'RAW', resource:{values:[['ID','Nombre','Monto','Moneda','Frecuencia','ProximoPago','Categoria','Notas']]}
+      });
+    }
+  } catch(e) {}
 }
 
 async function ensureComprasInvSheet() {
@@ -329,6 +362,12 @@ async function syncFromSheets() {
       });
       state.investmentPurchases = (purResp.result.values||[]).map(r=>({ id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'', shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountUSD:Number(r[5])||0 })).filter(p=>p.investmentId);
     } catch(e) { await ensureComprasInvSheet(); }
+    try {
+      const subResp = await gapi.client.sheets.spreadsheets.values.get({
+        spreadsheetId:state.spreadsheetId, range:'Suscripciones!A2:H'
+      });
+      state.subscriptions = (subResp.result.values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', amount:Number(r[2])||0, currency:r[3]||'COP', frequency:r[4]||'monthly', nextPaymentDate:r[5]||'', category:r[6]||'Servicios', notes:r[7]||'' })).filter(s=>s.name);
+    } catch(e) { await ensureSuscripcionesSheet(); }
     saveLocal();
   } catch(e) { console.error('syncFromSheets', e); }
 }
@@ -383,6 +422,65 @@ async function deleteSavingsGoal(id) {
   try { await deleteRowById('Ahorro',id); } catch(e) {}
 }
 
+/* ── Subscriptions: helpers ──────────────────────────────── */
+function freqLabel(f) {
+  return { weekly:'Semanal', monthly:'Mensual', quarterly:'Trimestral', semestral:'Semestral', annual:'Anual' }[f] || f;
+}
+function freqMonths(f) {
+  return { weekly:7/30, monthly:1, quarterly:3, semestral:6, annual:12 }[f] || 1;
+}
+function calcNextPaymentDate(frequency, fromDate) {
+  const d = new Date(fromDate + 'T00:00:00');
+  switch(frequency) {
+    case 'weekly':    d.setDate(d.getDate()+7); break;
+    case 'monthly':   d.setMonth(d.getMonth()+1); break;
+    case 'quarterly': d.setMonth(d.getMonth()+3); break;
+    case 'semestral': d.setMonth(d.getMonth()+6); break;
+    case 'annual':    d.setFullYear(d.getFullYear()+1); break;
+  }
+  return d.toISOString().slice(0,10);
+}
+function getUpcomingSubscriptions(days=30) {
+  const now = new Date(); now.setHours(0,0,0,0);
+  const limit = new Date(now); limit.setDate(limit.getDate()+days);
+  return state.subscriptions.filter(s => {
+    if (!s.nextPaymentDate) return false;
+    const d = new Date(s.nextPaymentDate+'T00:00:00');
+    return d <= limit;
+  }).sort((a,b) => a.nextPaymentDate.localeCompare(b.nextPaymentDate));
+}
+function getMonthlySubscriptionCost() {
+  return state.subscriptions.reduce((total, s) => {
+    const monthly = s.amount / freqMonths(s.frequency);
+    return total + (s.currency === 'USD' ? monthly * (state.usdCopRate||4200) : monthly);
+  }, 0);
+}
+function subDaysUntil(dateStr) {
+  const now = new Date(); now.setHours(0,0,0,0);
+  return Math.ceil((new Date(dateStr+'T00:00:00') - now) / 86400000);
+}
+function subIcon(cat) {
+  const m = {'Streaming':'📺','Música':'🎵','Software':'💻','Membresías':'🏷️','Seguros':'🛡️','Servicios':'⚡','Gimnasio':'🏋️','Nube':'☁️','Gaming':'🎮','Otros':'📦'};
+  return m[cat] || '📦';
+}
+
+/* ── CRUD: Subscriptions ─────────────────────────────────── */
+async function addSubscription(sub) {
+  sub.id = uid();
+  state.subscriptions.push(sub); saveLocal(); renderView();
+  try { await appendRow('Suscripciones',[sub.id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); } catch(e) {}
+}
+async function deleteSubscription(id) {
+  state.subscriptions = state.subscriptions.filter(s=>s.id!==id); saveLocal(); renderView();
+  try { await deleteRowById('Suscripciones',id); } catch(e) {}
+}
+async function markSubscriptionPaid(id) {
+  const sub = state.subscriptions.find(s=>s.id===id); if (!sub) return;
+  sub.nextPaymentDate = calcNextPaymentDate(sub.frequency, todayISO());
+  saveLocal(); renderView();
+  try { await updateRowById('Suscripciones',id,[id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); } catch(e) {}
+}
+
 /* ── CRUD: Investments ───────────────────────────────────── */
 async function addInvestment(inv) {
   inv.id = uid();
@@ -428,7 +526,9 @@ function openModal(html) { document.getElementById('modal-content').innerHTML=ht
 function closeModal()    { document.getElementById('modal-overlay').classList.add('hidden'); }
 function handleOverlayClick(e) { if (e.target===document.getElementById('modal-overlay')) closeModal(); }
 function openAddModal() {
-  ({ dashboard:openTransactionModal, transactions:openTransactionModal, savings:openSavingsModal, investments:openInvestmentModal, projection:openTransactionModal }[state.view]||openTransactionModal)();
+  if (state.view === 'savings' && state.savingsSubTab === 'subs') return openSubscriptionModal();
+  if (state.view === 'savings') return openSavingsModal();
+  ({ dashboard:openTransactionModal, transactions:openTransactionModal, investments:openInvestmentModal, projection:openTransactionModal }[state.view]||openTransactionModal)();
 }
 
 /* ── Transaction Modal ───────────────────────────────────── */
@@ -464,14 +564,16 @@ function openTransactionModal(tx) {
         <label class="form-label">Monto (COP)</label>
         <input class="form-input" type="number" id="tx-amount" placeholder="0" min="0" value="${tx?.amount||''}" required>
       </div>
-      ${type==='Gasto'?`
       <div class="form-group">
-        <label class="form-label">Método de pago</label>
+        <label class="form-label">Método</label>
         <div class="pay-toggle">
           <button type="button" class="pay-btn ${(tx?.paymentMethod||state.addPaymentMethod)==='Efectivo'?'active':''}" onclick="switchPayMethod('Efectivo')">💵 Efectivo</button>
-          <button type="button" class="pay-btn ${(tx?.paymentMethod||state.addPaymentMethod)==='Tarjeta'?'active':''}" onclick="switchPayMethod('Tarjeta')">💳 Tarjeta</button>
+          ${type==='Gasto'
+            ? `<button type="button" class="pay-btn ${(tx?.paymentMethod||state.addPaymentMethod)==='Tarjeta'?'active':''}" onclick="switchPayMethod('Tarjeta')">💳 Tarjeta</button>`
+            : `<button type="button" class="pay-btn ${(tx?.paymentMethod||state.addPaymentMethod)==='Transferencia'?'active':''}" onclick="switchPayMethod('Transferencia')">🏦 Transferencia</button>`
+          }
         </div>
-      </div>`:''}
+      </div>
       <button type="submit" class="btn-primary">${editing?'Guardar cambios':'Agregar'}</button>
     </form>`);
 }
@@ -479,7 +581,7 @@ function switchModalType(type) { state.addType=type; state.addPaymentMethod='Efe
 function switchPayMethod(method) { state.addPaymentMethod=method; document.querySelectorAll('.pay-btn').forEach(b=>b.classList.toggle('active',b.textContent.includes(method))); }
 async function submitTransaction(e, editId) {
   e.preventDefault();
-  const paymentMethod = state.addType==='Gasto' ? state.addPaymentMethod : '';
+  const paymentMethod = state.addPaymentMethod;
   const tx = { date:document.getElementById('tx-date').value, type:state.addType, category:document.getElementById('tx-cat').value, description:document.getElementById('tx-desc').value.trim(), amount:Number(document.getElementById('tx-amount').value), paymentMethod };
   closeModal();
   if (editId) {
@@ -487,7 +589,17 @@ async function submitTransaction(e, editId) {
     if (idx>=0) state.transactions[idx] = {...state.transactions[idx],...tx};
     saveLocal(); renderView();
     try { await updateRowById('Transacciones',editId,[editId,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||'']); } catch(e) {}
-  } else { await addTransaction(tx); }
+  } else {
+    await addTransaction(tx);
+    // Auto-link: if a Gasto matches a subscription name, advance its next payment date
+    if (tx.type === 'Gasto') {
+      const matched = state.subscriptions.find(s =>
+        tx.description.toLowerCase().includes(s.name.toLowerCase()) ||
+        s.name.toLowerCase().includes(tx.description.toLowerCase())
+      );
+      if (matched) await markSubscriptionPaid(matched.id);
+    }
+  }
 }
 
 /* ── Savings Modal ───────────────────────────────────────── */
@@ -525,6 +637,122 @@ async function submitProgress(e, id) {
   e.preventDefault();
   const amt = Number(document.getElementById('prog-amount').value);
   closeModal(); await updateSavingsProgress(id, amt);
+}
+
+/* ── Subscription Modal ──────────────────────────────────── */
+function openSubscriptionModal(sub) {
+  const editing = !!sub;
+  const cats = ['Streaming','Música','Software','Membresías','Seguros','Servicios','Gimnasio','Nube','Gaming','Otros'];
+  openModal(`
+    <div class="modal-header">
+      <h2 class="modal-title">${editing?'Editar':'Nueva'} Suscripción</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <form onsubmit="submitSubscription(event,'${sub?.id||''}')">
+      <div class="form-group">
+        <label class="form-label">Nombre</label>
+        <input class="form-input" type="text" id="sub-name" placeholder="Ej: Netflix, Spotify…" value="${sub?.name||''}" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Monto</label>
+          <input class="form-input" type="number" id="sub-amount" placeholder="0" min="0" step="any" value="${sub?.amount||''}" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Moneda</label>
+          <select class="form-input" id="sub-currency">
+            <option value="COP" ${(sub?.currency||'COP')==='COP'?'selected':''}>COP</option>
+            <option value="USD" ${sub?.currency==='USD'?'selected':''}>USD</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Frecuencia</label>
+          <select class="form-input" id="sub-freq">
+            ${['weekly','monthly','quarterly','semestral','annual'].map(f=>`<option value="${f}" ${(sub?.frequency||'monthly')===f?'selected':''}>${freqLabel(f)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Categoría</label>
+          <select class="form-input" id="sub-cat">
+            ${cats.map(c=>`<option value="${c}" ${sub?.category===c?'selected':''}>${subIcon(c)} ${c}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Próximo pago</label>
+        <input class="form-input" type="date" id="sub-next" value="${sub?.nextPaymentDate||todayISO()}" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notas</label>
+        <input class="form-input" type="text" id="sub-notes" placeholder="Opcional" value="${sub?.notes||''}">
+      </div>
+      <button type="submit" class="btn-primary">${editing?'Guardar cambios':'Agregar suscripción'}</button>
+    </form>`);
+}
+async function submitSubscription(e, editId) {
+  e.preventDefault();
+  const sub = {
+    name:            document.getElementById('sub-name').value.trim(),
+    amount:          Number(document.getElementById('sub-amount').value),
+    currency:        document.getElementById('sub-currency').value,
+    frequency:       document.getElementById('sub-freq').value,
+    category:        document.getElementById('sub-cat').value,
+    nextPaymentDate: document.getElementById('sub-next').value,
+    notes:           document.getElementById('sub-notes').value.trim()
+  };
+  closeModal();
+  if (editId) {
+    const idx = state.subscriptions.findIndex(s=>s.id===editId);
+    if (idx>=0) state.subscriptions[idx] = {...state.subscriptions[idx],...sub};
+    saveLocal(); renderView();
+    const s = state.subscriptions[idx>=0?idx:0];
+    try { await updateRowById('Suscripciones',editId,[editId,s.name,s.amount,s.currency,s.frequency,s.nextPaymentDate,s.category,s.notes||'']); } catch(e) {}
+  } else { await addSubscription(sub); }
+}
+
+/* ── Subscription Card ───────────────────────────────────── */
+function subscriptionCard(sub) {
+  const days = subDaysUntil(sub.nextPaymentDate);
+  const isOverdue = days < 0;
+  const isUrgent  = !isOverdue && days <= 3;
+  const isSoon    = !isOverdue && days <= 7;
+  const monthlyCOP = sub.currency === 'USD'
+    ? (sub.amount / freqMonths(sub.frequency)) * (state.usdCopRate||4200)
+    : sub.amount / freqMonths(sub.frequency);
+  const daysLabel = isOverdue
+    ? `⚠️ Vencida hace ${Math.abs(days)} día${Math.abs(days)!==1?'s':''}`
+    : days===0 ? '🔴 Hoy' : days===1 ? '🟡 Mañana' : `📅 En ${days} días`;
+  const urgCls = isOverdue ? 'sub-overdue' : isUrgent ? 'sub-urgent' : isSoon ? 'sub-soon' : '';
+  return `
+    <div class="sub-card ${urgCls}">
+      <div class="sub-header">
+        <div class="sub-icon-name">
+          <span class="sub-icon-badge">${subIcon(sub.category)}</span>
+          <div>
+            <div class="sub-name">${sub.name}</div>
+            <div class="sub-meta">${freqLabel(sub.frequency)} · ${sub.category}</div>
+          </div>
+        </div>
+        <div class="sub-actions-row">
+          <button class="action-btn" onclick='openSubscriptionModal(${JSON.stringify(sub)})'>✏️</button>
+          <button class="action-btn danger" onclick="confirmDelete('sub','${sub.id}')">🗑️</button>
+        </div>
+      </div>
+      <div class="sub-body">
+        <div>
+          <div class="sub-amount-val">${sub.currency==='USD'?formatUSD(sub.amount):formatCOP(sub.amount)}</div>
+          <div class="sub-monthly-val">≈ ${formatCOP(monthlyCOP)}/mes</div>
+        </div>
+        <div class="sub-next-block">
+          <div class="sub-next-label">Próximo pago</div>
+          <div class="sub-next-date">${dateStr(sub.nextPaymentDate)}</div>
+          <div class="sub-days ${urgCls}">${daysLabel}</div>
+        </div>
+      </div>
+      <button class="sub-paid-btn" onclick="markSubscriptionPaid('${sub.id}')">✓ Marcar pagada · avanzar al próximo ciclo</button>
+    </div>`;
 }
 
 /* ── Investment Modal (with ticker search) ───────────────── */
@@ -758,6 +986,7 @@ async function doDelete(entity, id) {
   if (entity==='tx')      await deleteTransaction(id);
   if (entity==='savings') await deleteSavingsGoal(id);
   if (entity==='inv')     await deleteInvestment(id);
+  if (entity==='sub')     await deleteSubscription(id);
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -869,6 +1098,34 @@ function renderDashboard() {
           </table>
         </div>` : ''}
 
+      <!-- Suscripciones próximas -->
+      ${(() => {
+        const upcomingSubs = getUpcomingSubscriptions(7);
+        if (!upcomingSubs.length) return '';
+        return `
+          <div class="section-header">
+            <span class="section-title">⚠️ Suscripciones próximas</span>
+            <button class="section-link" onclick="setSavingsTab('subs');navigate('savings')">Ver todas</button>
+          </div>
+          <div class="card" style="padding:0;overflow:hidden">
+            <table class="summary-table">
+              <thead><tr><th>Nombre</th><th>Monto</th><th>Vence</th><th>Días</th></tr></thead>
+              <tbody>
+                ${upcomingSubs.map(s => {
+                  const days = subDaysUntil(s.nextPaymentDate);
+                  const isOverdue = days < 0;
+                  return `<tr>
+                    <td>${subIcon(s.category)} ${s.name}</td>
+                    <td class="col-expense">${s.currency==='USD'?formatUSD(s.amount):formatCOP(s.amount)}</td>
+                    <td>${dateStr(s.nextPaymentDate)}</td>
+                    <td class="${isOverdue?'col-expense':'col-pct'}">${isOverdue?'Vencida':days===0?'Hoy':days===1?'Mañana':days+' días'}</td>
+                  </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>`;
+      })()}
+
       ${!hasTx ? `<p class="empty-state">Sin datos todavía.<br>Toca + para agregar tu primera transacción.</p>` : ''}
     </div>`;
 }
@@ -954,21 +1211,52 @@ function txCard(t, showActions=false) {
 /* ════════════════════════════════════════════════════════════
    VIEW: SAVINGS
    ════════════════════════════════════════════════════════════ */
+function setSavingsTab(tab) { state.savingsSubTab = tab; renderSavings(); }
+
 function renderSavings() {
+  const tab = state.savingsSubTab;
   const totalGoal    = state.savings.reduce((a,s)=>a+s.goal,0);
   const totalCurrent = state.savings.reduce((a,s)=>a+s.current,0);
+  const monthlySubs  = getMonthlySubscriptionCost();
+  const upcoming7    = getUpcomingSubscriptions(7).length;
+
   document.getElementById('app-content').innerHTML = `
     <div class="content-inner">
-      <div class="balance-card">
-        <div class="balance-label">Total ahorrado</div>
-        <div class="balance-amount">${formatCOP(totalCurrent)}</div>
-        <div class="balance-sub">de ${formatCOP(totalGoal)} en metas</div>
+      <div class="savings-tabs">
+        <button class="savings-tab ${tab==='goals'?'active':''}" onclick="setSavingsTab('goals')">
+          🎯 Metas${state.savings.length ? ` <span class="tab-badge">${state.savings.length}</span>` : ''}
+        </button>
+        <button class="savings-tab ${tab==='subs'?'active':''}" onclick="setSavingsTab('subs')">
+          🔄 Suscripciones${upcoming7 ? ` <span class="tab-badge urgent">${upcoming7}</span>` : ''}
+        </button>
       </div>
-      <div class="section-header">
-        <span class="section-title">Mis metas</span>
-        <button class="section-link" onclick="openSavingsModal()">+ Nueva</button>
-      </div>
-      ${state.savings.length===0?`<p class="empty-state">Sin metas de ahorro.<br>Toca + para crear una.</p>`:state.savings.map(savingsCard).join('')}
+      ${tab === 'goals' ? `
+        <div class="balance-card">
+          <div class="balance-label">Total ahorrado</div>
+          <div class="balance-amount">${formatCOP(totalCurrent)}</div>
+          <div class="balance-sub">de ${formatCOP(totalGoal)} en metas</div>
+        </div>
+        <div class="section-header">
+          <span class="section-title">Mis metas</span>
+          <button class="section-link" onclick="openSavingsModal()">+ Nueva</button>
+        </div>
+        ${state.savings.length===0 ? `<p class="empty-state">Sin metas de ahorro.<br>Toca + para crear una.</p>` : state.savings.map(savingsCard).join('')}
+      ` : `
+        <div class="balance-card" style="background:linear-gradient(135deg,#AF52DE,#7B2FBE)">
+          <div class="balance-label">Gasto mensual en suscripciones</div>
+          <div class="balance-amount">${formatCOP(monthlySubs)}</div>
+          <div class="balance-sub">${state.subscriptions.length} suscripción${state.subscriptions.length!==1?'es':''} · ${upcoming7} por vencer en 7 días</div>
+        </div>
+        <div class="section-header">
+          <span class="section-title">Mis suscripciones</span>
+          <button class="section-link" onclick="openSubscriptionModal()">+ Nueva</button>
+        </div>
+        ${state.subscriptions.length===0
+          ? `<p class="empty-state">Sin suscripciones registradas.<br>Toca + para agregar.</p>`
+          : state.subscriptions
+              .slice().sort((a,b)=>a.nextPaymentDate.localeCompare(b.nextPaymentDate))
+              .map(subscriptionCard).join('')}
+      `}
     </div>`;
 }
 function savingsCard(s) {
@@ -1160,7 +1448,10 @@ async function manualRefreshPrices() {
    ════════════════════════════════════════════════════════════ */
 function renderProjection() {
   const months = getMonthlyHistory(6);
-  const avgInc = getAvgMonthlyIncome(), avgExp = getAvgMonthlyExpense(), avgNet = avgInc-avgExp;
+  const avgInc = getAvgMonthlyIncome();
+  const subCost = getMonthlySubscriptionCost();
+  const avgExp = getAvgMonthlyExpense() + subCost;
+  const avgNet = avgInc-avgExp;
   const balance = getBalance();
   const maxVal = Math.max(...months.map(m=>Math.max(m.income,m.expense)),1);
   const fwd = Array.from({length:6},(_,i)=>{
