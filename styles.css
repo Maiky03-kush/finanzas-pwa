@@ -786,6 +786,41 @@ body {
 }
 .inv-cost-basis strong { color: var(--text); }
 
+/* ── Investment edit modal panel ────────────────────── */
+.inv-edit-panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.inv-edit-panel-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+}
+.inv-edit-panel-row span { color: var(--muted); }
+.inv-edit-panel-row strong { font-weight: 600; }
+.inv-edit-panel-gain {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  font-size: 15px;
+}
+.inv-edit-warn {
+  font-size: 12px;
+  color: #f59e0b;
+  background: rgba(245,158,11,0.1);
+  border: 1px solid rgba(245,158,11,0.25);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+.live-dot { color: #34C759; font-size: 12px; }
+
 /* ── Purchase history delete button ─────────────────── */
 .ph-del-btn {
   background: none;

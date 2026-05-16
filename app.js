@@ -1169,48 +1169,83 @@ async function submitUpdateValue(e, id) {
 }
 function openEditInvestmentModal(inv) {
   const types = ['Acciones','ETF','Criptomoneda','Fondo de inversión','Bonos','CDT','Otro'];
-  const fullInv = state.investments.find(i=>i.id===inv.id) || inv;
+  const fi = state.investments.find(i=>i.id===inv.id) || inv;
+  const hasTicker  = !!(fi.ticker);
+  const livePrice  = fi.marketPrice || 0;
+  const shares     = fi.shares || 0;
+  const invested   = fi.invested || 0;
+  // Valor actual: shares × precio vivo, o currentValue si no hay precio
+  const curVal  = hasTicker && livePrice > 0 ? shares * livePrice : (fi.currentValue || invested);
+  const gain    = curVal - invested;
+  const gainPct = invested > 0 ? (gain / invested * 100) : 0;
+  const gainCol = gain >= 0 ? 'var(--green)' : 'var(--red)';
+  const gainSign= gain >= 0 ? '+' : '';
+
+  const livePanelHtml = hasTicker ? `
+    <div class="inv-edit-panel">
+      <div class="inv-edit-panel-row">
+        <span>Precio en vivo</span>
+        <strong>${livePrice > 0
+          ? `${formatUSD(livePrice)} <span class="live-dot">⚡</span>`
+          : '<span style="color:var(--muted)">No cargado aún — actualiza precios</span>'}</strong>
+      </div>
+      <div class="inv-edit-panel-row">
+        <span>Unidades / Acciones</span>
+        <strong>${shares > 0 ? shares : '<span style="color:var(--red)">0 — edita el lote ✏️</span>'}</strong>
+      </div>
+      <div class="inv-edit-panel-row">
+        <span>Monto invertido</span>
+        <strong>${formatUSD(invested)}</strong>
+      </div>
+      <div class="inv-edit-panel-row">
+        <span>Valor actual</span>
+        <strong>${formatUSD(curVal)}</strong>
+      </div>
+      <div class="inv-edit-panel-row inv-edit-panel-gain">
+        <span>Ganancia / Pérdida</span>
+        <strong style="color:${gainCol}">${gainSign}${formatUSD(gain)} (${gainSign}${gainPct.toFixed(2)}%)</strong>
+      </div>
+    </div>
+    ${shares === 0 ? `<p class="inv-edit-warn">⚠️ Unidades en 0 — abre el historial y pulsa ✏️ en el lote de compra para corregir el precio y las unidades.</p>` : ''}
+  ` : `
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Monto invertido (USD)</label>
+        <input class="form-input" type="number" id="inv-edit-invested" min="0" step="any" value="${invested}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Valor actual (USD)</label>
+        <input class="form-input" type="number" id="inv-edit-value" min="0" step="any" value="${fi.currentValue||0}">
+      </div>
+    </div>
+  `;
+
   openModal(`
     <div class="modal-header">
       <h2 class="modal-title">Editar Inversión</h2>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <form onsubmit="submitEditInvestment(event,'${fullInv.id}')">
+    <form onsubmit="submitEditInvestment(event,'${fi.id}')">
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Ticker</label>
-          <input class="form-input" type="text" id="inv-edit-ticker" value="${fullInv.ticker||''}" style="text-transform:uppercase">
+          <input class="form-input" type="text" id="inv-edit-ticker" value="${fi.ticker||''}" style="text-transform:uppercase">
         </div>
         <div class="form-group">
           <label class="form-label">Nombre</label>
-          <input class="form-input" type="text" id="inv-edit-name" value="${fullInv.name||''}" required>
+          <input class="form-input" type="text" id="inv-edit-name" value="${fi.name||''}" required>
         </div>
       </div>
       <div class="form-group">
         <label class="form-label">Tipo</label>
         <select class="form-input" id="inv-edit-type">
-          ${types.map(t=>`<option value="${t}" ${fullInv.type===t?'selected':''}>${t}</option>`).join('')}
+          ${types.map(t=>`<option value="${t}" ${fi.type===t?'selected':''}>${t}</option>`).join('')}
         </select>
       </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Valor Actual (USD)</label>
-          <input class="form-input" type="number" id="inv-edit-value" min="0" step="any"
-            value="${fullInv.currentValue||0}"
-            ${fullInv.ticker ? 'title="Se actualiza automáticamente con precios en vivo"' : ''}>
-          ${fullInv.ticker ? '<small style="color:var(--muted);font-size:11px">⚡ Se actualiza con precio en vivo</small>' : ''}
-        </div>
-        <div class="form-group">
-          <label class="form-label">Monto invertido (USD)</label>
-          <input class="form-input" type="number" id="inv-edit-invested" min="0" step="any"
-            value="${fullInv.invested||0}"
-            title="Calculado automáticamente desde tus compras">
-          <small style="color:var(--muted);font-size:11px">📋 Calculado desde compras</small>
-        </div>
-      </div>
+      ${livePanelHtml}
       <div class="form-group">
         <label class="form-label">Notas</label>
-        <input class="form-input" type="text" id="inv-edit-notes" value="${fullInv.notes||''}">
+        <input class="form-input" type="text" id="inv-edit-notes" value="${fi.notes||''}">
       </div>
       <button type="submit" class="btn-primary">Guardar cambios</button>
     </form>`);
@@ -1218,21 +1253,17 @@ function openEditInvestmentModal(inv) {
 async function submitEditInvestment(e, id) {
   e.preventDefault();
   const inv = state.investments.find(i=>i.id===id); if (!inv) return;
-  inv.ticker       = document.getElementById('inv-edit-ticker').value.trim().toUpperCase();
-  inv.name         = document.getElementById('inv-edit-name').value.trim();
-  inv.type         = document.getElementById('inv-edit-type').value;
-  inv.notes        = document.getElementById('inv-edit-notes').value.trim();
-  const newValue   = Number(document.getElementById('inv-edit-value').value)||0;
-  const newInvested= Number(document.getElementById('inv-edit-invested').value)||0;
-  // Only apply manual overrides if there are no purchase lots driving the numbers
-  const hasPurchases = state.investmentPurchases.some(p=>p.investmentId===id);
-  if (!hasPurchases) {
-    inv.currentValue = newValue;
-    inv.invested     = newInvested;
+  inv.ticker = document.getElementById('inv-edit-ticker').value.trim().toUpperCase();
+  inv.name   = document.getElementById('inv-edit-name').value.trim();
+  inv.type   = document.getElementById('inv-edit-type').value;
+  inv.notes  = document.getElementById('inv-edit-notes').value.trim();
+  if (!inv.ticker) {
+    // Sin ticker: los valores se editan manualmente
+    inv.currentValue = Number(document.getElementById('inv-edit-value')?.value) || 0;
+    inv.invested     = Number(document.getElementById('inv-edit-invested')?.value) || 0;
   } else {
-    // With purchases: always recalc invested from lots, but allow currentValue override
+    // Con ticker: los valores vienen de compras + precio en vivo, no se tocan aquí
     recalcInvestment(id);
-    inv.currentValue = newValue;
   }
   closeModal(); saveLocal(); renderView();
   if (!state.accessToken) return;
