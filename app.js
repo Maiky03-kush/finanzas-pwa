@@ -436,12 +436,48 @@ async function syncFromSheets() {
     const vrs = resp.result.valueRanges;
     state.transactions = (vrs[0].values||[]).map(r=>({ id:r[0]||uid(), date:r[1]||'', type:r[2]||'Gasto', category:r[3]||'Otros', description:r[4]||'', amount:Number(r[5])||0, paymentMethod:r[6]||'' })).filter(t=>t.date);
     state.savings      = (vrs[1].values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', goal:Number(r[2])||0, current:Number(r[3])||0, deadline:r[4]||'', notes:r[5]||'' })).filter(s=>s.name);
-    state.investments  = (vrs[2].values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', ticker:r[2]||'', type:r[3]||'', invested:Number(r[4])||0, currentValue:Number(r[5])||0, shares:Number(r[6])||0, purchasePrice:Number(r[7])||0, notes:r[8]||'' })).filter(i=>i.name);
+    state.investments = (vrs[2].values||[]).map(r => {
+      const inv = { id:r[0]||uid(), name:r[1]||'', ticker:r[2]||'', type:r[3]||'',
+        invested:Number(r[4])||0, currentValue:Number(r[5])||0,
+        shares:Number(r[6])||0, purchasePrice:Number(r[7])||0, notes:r[8]||'' };
+      // Auto-repair: H (Precio Compra) is the source of truth.
+      // If Acciones=0 but Invertido>0 and Precio>0, recalculate shares = E/H
+      if (inv.shares === 0 && inv.invested > 0 && inv.purchasePrice > 0) {
+        inv.shares = Math.round(inv.invested / inv.purchasePrice * 1e8) / 1e8;
+      }
+      return inv;
+    }).filter(i=>i.name);
     try {
       const purResp = await gapi.client.sheets.spreadsheets.values.get({
         spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F'
       });
-      state.investmentPurchases = (purResp.result.values||[]).map(r=>({ id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'', shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountUSD:Number(r[5])||0 })).filter(p=>p.investmentId);
+      state.investmentPurchases = (purResp.result.values||[]).map(r => {
+        const p = { id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'',
+          shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountUSD:Number(r[5])||0 };
+        // Auto-repair: if priceUSD=0 but parent investment has purchasePrice, use it
+        if (p.priceUSD === 0 && p.amountUSD > 0) {
+          const parent = state.investments.find(i=>i.id===p.investmentId);
+          if (parent && parent.purchasePrice > 0) {
+            p.priceUSD = parent.purchasePrice;
+            p.shares   = Math.round(p.amountUSD / p.priceUSD * 1e8) / 1e8;
+          }
+        }
+        return p;
+      }).filter(p=>p.investmentId);
+      // Write repairs back to Compras_Inv so they persist
+      const repairedPurchases = state.investmentPurchases.filter(p=>p.priceUSD>0 && p.shares>0);
+      for (const p of repairedPurchases) {
+        try { await updateRowById('Compras_Inv', p.id, [p.id,p.investmentId,p.date,p.shares,p.priceUSD,p.amountUSD]); } catch(e) {}
+      }
+      // Recalc and persist Inversiones rows with corrected shares
+      if (repairedPurchases.length > 0) {
+        state.investments.forEach(inv => recalcInvestment(inv.id));
+        for (const inv of state.investments) {
+          if (inv.invested > 0) {
+            try { await updateRowById('Inversiones', inv.id, invArr(inv)); } catch(e) {}
+          }
+        }
+      }
     } catch(e) { await ensureComprasInvSheet(); }
     try {
       const subResp = await gapi.client.sheets.spreadsheets.values.get({
