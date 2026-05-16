@@ -181,7 +181,23 @@ async function refreshInvestmentPrices() {
     }
   }
   state.pricesLastUpdated = new Date();
-  if (updated) saveLocal();
+  if (updated) {
+    saveLocal();
+    // Sync updated currentValue back to Google Sheets (non-blocking)
+    if (state.accessToken) {
+      for (const inv of state.investments) {
+        if (inv.ticker && Number(inv.shares) > 0) {
+          try {
+            await updateRowById('Inversiones', inv.id, [
+              inv.id, inv.name, inv.ticker||'', inv.type||'',
+              inv.invested, inv.currentValue,
+              inv.shares||0, inv.purchasePrice||0, inv.notes||''
+            ]);
+          } catch(e) {}
+        }
+      }
+    }
+  }
 }
 
 /* ── Navigation ──────────────────────────────────────────── */
@@ -1709,6 +1725,21 @@ async function enableNotifications() {
     alert('No se pudo activar las notificaciones. Revisa los permisos del navegador para este sitio.');
   }
 }
+
+/* ── Prevent pull-to-refresh on Android PWA ─────────────── */
+(function() {
+  let startY = 0;
+  document.addEventListener('touchstart', e => {
+    startY = e.touches[0].clientY;
+  }, { passive: true });
+  document.addEventListener('touchmove', e => {
+    const el = e.target.closest('[data-scroll]') || document.scrollingElement;
+    const atTop = (el ? el.scrollTop : window.scrollY) <= 0;
+    if (atTop && e.touches[0].clientY > startY) {
+      e.preventDefault();
+    }
+  }, { passive: false });
+})();
 
 /* ── Boot ────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
