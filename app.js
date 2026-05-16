@@ -121,9 +121,16 @@ function getPortfolioSummary() {
 /* ══════════════════════════════════════════════════════════
    MARKET DATA — Yahoo Finance via local proxy
    ══════════════════════════════════════════════════════════ */
+function normalizeTicker(t) {
+  const s = (t||'').toUpperCase().trim();
+  if (/^[A-Z]{2,10}USD$/.test(s) && !s.includes('-')) return s.slice(0,-3)+'-USD';
+  return s;
+}
+
 async function fetchQuote(ticker) {
+  const sym = normalizeTicker(ticker);
   try {
-    const r = await fetch(`/api/quote?ticker=${encodeURIComponent(ticker)}`);
+    const r = await fetch(`/api/quote?ticker=${encodeURIComponent(sym)}`);
     const data = await r.json();
     const meta = data?.chart?.result?.[0]?.meta;
     if (!meta) return null;
@@ -143,7 +150,7 @@ async function fetchSearch(query) {
     const r = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
     const data = await r.json();
     return (data?.quotes || [])
-      .filter(q => ['EQUITY','ETF','MUTUALFUND'].includes(q.quoteType))
+      .filter(q => ['EQUITY','ETF','MUTUALFUND','CRYPTOCURRENCY'].includes(q.quoteType))
       .slice(0, 7);
   } catch(e) { return []; }
 }
@@ -817,9 +824,9 @@ function openInvestmentModal() {
     </div>
 
     <div class="form-group">
-      <label class="form-label">Buscar acción / ETF</label>
+      <label class="form-label">Buscar acción / ETF / Cripto</label>
       <div class="search-box">
-        <input class="form-input" type="text" id="inv-search" placeholder="Ej: Apple, AAPL, S&P 500..." autocomplete="off" oninput="searchTicker(this.value)">
+        <input class="form-input" type="text" id="inv-search" placeholder="Ej: Apple, AAPL, Bitcoin, BTC-USD…" autocomplete="off" oninput="searchTicker(this.value)">
         <div id="search-results" class="search-dropdown hidden"></div>
       </div>
     </div>
@@ -827,8 +834,8 @@ function openInvestmentModal() {
     <form onsubmit="submitInvestment(event)">
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">Ticker</label>
-          <input class="form-input" type="text" id="inv-ticker" placeholder="Ej: AAPL" style="text-transform:uppercase">
+          <label class="form-label">Ticker / Símbolo</label>
+          <input class="form-input" type="text" id="inv-ticker" placeholder="Ej: AAPL, BTC-USD" style="text-transform:uppercase">
         </div>
         <div class="form-group">
           <label class="form-label">Nombre</label>
@@ -843,31 +850,27 @@ function openInvestmentModal() {
             <option>Fondo de inversión</option><option>Bonos</option><option>CDT</option><option>Otro</option>
           </select>
         </div>
+        <div class="form-group">
+          <label class="form-label">Fecha de compra</label>
+          <input class="form-input" type="date" id="inv-date" value="${todayISO()}" required>
+        </div>
       </div>
 
-      <div class="shares-section">
-        <label class="form-label" style="margin-bottom:10px;display:block;">Seguimiento por acciones (opcional — para precios en vivo)</label>
+      <div class="form-group" style="background:var(--bg);border:1.5px solid var(--border);border-radius:10px;padding:14px;margin-top:4px">
+        <div style="font-weight:600;margin-bottom:12px;color:var(--text)">📦 Primera compra</div>
         <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">N° de acciones</label>
-            <input class="form-input" type="number" id="inv-shares" placeholder="0" min="0" step="any" oninput="calcInvestedFromShares()">
+          <div class="form-group" style="margin-bottom:8px">
+            <label class="form-label">Unidades / Acciones</label>
+            <input class="form-input" type="number" id="inv-shares" placeholder="0" min="0" step="any" oninput="calcInvestedFromShares()" required>
           </div>
-          <div class="form-group">
-            <label class="form-label">Precio compra (USD)</label>
-            <input class="form-input" type="number" id="inv-purchase-price" placeholder="0.00" min="0" step="any" oninput="calcInvestedFromShares()">
+          <div class="form-group" style="margin-bottom:8px">
+            <label class="form-label">Precio de entrada (USD)</label>
+            <input class="form-input" type="number" id="inv-purchase-price" placeholder="0.00" min="0" step="any" oninput="calcInvestedFromShares()" required>
           </div>
         </div>
-        <div class="calc-hint" id="inv-calc-hint"></div>
+        <div class="calc-hint" id="inv-calc-hint" style="margin-top:4px"></div>
       </div>
 
-      <div class="form-group">
-        <label class="form-label">Total invertido (USD) <span id="inv-cop-label" style="color:var(--muted)"></span></label>
-        <input class="form-input" type="number" id="inv-invested" placeholder="0.00" min="0" step="any" required>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Valor actual (USD) — dejar en blanco si igual al invertido</label>
-        <input class="form-input" type="number" id="inv-current" placeholder="Igual al invertido">
-      </div>
       <div class="form-group">
         <label class="form-label">Notas</label>
         <input class="form-input" type="text" id="inv-notes" placeholder="Opcional">
@@ -904,7 +907,7 @@ function selectTicker(symbol, name, exchange, type) {
   document.getElementById('inv-ticker').value = symbol;
   document.getElementById('inv-name').value   = name;
   document.getElementById('inv-search').value = `${symbol} — ${name}`;
-  const typeMap = { EQUITY:'Acciones', ETF:'ETF', MUTUALFUND:'Fondo de inversión' };
+  const typeMap = { EQUITY:'Acciones', ETF:'ETF', MUTUALFUND:'Fondo de inversión', CRYPTOCURRENCY:'Criptomoneda' };
   const sel = document.getElementById('inv-type');
   if (sel && typeMap[type]) {
     Array.from(sel.options).forEach(o => { if (o.value===typeMap[type]) o.selected=true; });
@@ -925,21 +928,22 @@ function calcInvestedFromShares() {
 }
 async function submitInvestment(e) {
   e.preventDefault();
-  const invested = Number(document.getElementById('inv-invested').value);
-  const current  = Number(document.getElementById('inv-current').value)||invested;
+  const shares = Number(document.getElementById('inv-shares').value)||0;
+  const price  = Number(document.getElementById('inv-purchase-price').value)||0;
+  const invested = Math.round(shares * price * 1e8) / 1e8;
+  const date   = document.getElementById('inv-date').value || todayISO();
   const inv = {
     name:          document.getElementById('inv-name').value.trim(),
-    ticker:        document.getElementById('inv-ticker').value.trim().toUpperCase(),
+    ticker:        normalizeTicker(document.getElementById('inv-ticker').value.trim()),
     type:          document.getElementById('inv-type').value,
-    invested, currentValue: current,
-    shares:        Number(document.getElementById('inv-shares').value)||0,
-    purchasePrice: Number(document.getElementById('inv-purchase-price').value)||0,
+    invested, currentValue: invested,
+    shares, purchasePrice: price,
     notes:         document.getElementById('inv-notes').value.trim()
   };
   closeModal();
   await addInvestment(inv);
-  if (inv.shares > 0 && inv.purchasePrice > 0) {
-    await addInvestmentPurchase({ investmentId:inv.id, date:todayISO(), shares:inv.shares, priceUSD:inv.purchasePrice, amountUSD:invested });
+  if (shares > 0 && price > 0) {
+    await addInvestmentPurchase({ investmentId:inv.id, date, shares, priceUSD:price, amountUSD:invested });
   }
   if (inv.ticker) { await refreshInvestmentPrices(); renderView(); }
 }
@@ -960,7 +964,7 @@ function openAddPurchaseModal(invId) {
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">N° acciones</label>
+          <label class="form-label">Unidades / Acciones</label>
           <input class="form-input" type="number" id="pur-shares" placeholder="0" min="0" step="any" oninput="calcPurchaseAmount()" required>
         </div>
         <div class="form-group">
@@ -1451,6 +1455,8 @@ function purchaseHistorySection(inv) {
   const totalShares = purchases.reduce((a,p)=>a+p.shares,0);
   const weightedAvg = totalShares>0 ? purchases.reduce((a,p)=>a+p.shares*p.priceUSD,0)/totalShares : 0;
   const livePrice   = inv.marketPrice || 0;
+  const isCrypto    = inv.type === 'Criptomoneda';
+  const unitLabel   = isCrypto ? 'uds.' : 'acc.';
 
   const rows = purchases.map(p=>{
     const costUSD   = p.shares * p.priceUSD;
@@ -1460,31 +1466,32 @@ function purchaseHistorySection(inv) {
     return `
       <div class="ph-row">
         <span class="ph-date">${dateStr(p.date)}</span>
-        <span class="ph-shares">${p.shares} acc.</span>
+        <span class="ph-shares">${p.shares} ${unitLabel}</span>
         <span class="ph-price">${formatUSD(p.priceUSD)}</span>
         <span class="ph-usd">${formatUSD(costUSD)}</span>
         ${livePrice>0?`<span class="ph-pnl ${lotPnlUSD>=0?'profit':'loss'}">${lotPnlUSD>=0?'+':''}${formatUSD(lotPnlUSD)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
       </div>`;
   }).join('');
 
+  const startExpanded = purchases.length > 0;
   return `
     <div class="ph-container">
       <div class="ph-header" onclick="togglePurchaseHistory('${inv.id}')">
-        <span>📋 Historial de compras${purchases.length>0?` (${purchases.length})`:''}</span>
-        <span id="ph-arrow-${inv.id}">${purchases.length>0?'▼':'▶'}</span>
+        <span>📋 Historial de compras${purchases.length>0?` (${purchases.length} lotes)`:''}</span>
+        <span id="ph-arrow-${inv.id}">${startExpanded?'▼':'▶'}</span>
       </div>
-      <div class="ph-list ${purchases.length===0?'hidden':''}" id="ph-${inv.id}">
+      <div class="ph-list ${startExpanded?'':'hidden'}" id="ph-${inv.id}">
         ${purchases.length>0?`
           <div class="ph-summary">
-            <span>Total: <strong>${totalShares} acc.</strong></span>
-            ${weightedAvg>0?`<span>Precio prom: <strong>${formatUSD(weightedAvg)}</strong></span>`:''}
-            ${livePrice>0&&weightedAvg>0?`<span class="${livePrice>=weightedAvg?'profit':'loss'}">vs actual ${formatUSD(livePrice)} (${((livePrice-weightedAvg)/weightedAvg*100)>=0?'+':''}${((livePrice-weightedAvg)/weightedAvg*100).toFixed(1)}%)</span>`:''}
+            <span>Total: <strong>${totalShares} ${unitLabel}</strong></span>
+            ${weightedAvg>0?`<span>Precio promedio entrada: <strong>${formatUSD(weightedAvg)}</strong></span>`:''}
+            ${livePrice>0&&weightedAvg>0?`<span class="${livePrice>=weightedAvg?'profit':'loss'}">Precio actual ${formatUSD(livePrice)} · ${((livePrice-weightedAvg)/weightedAvg*100)>=0?'+':''}${((livePrice-weightedAvg)/weightedAvg*100).toFixed(2)}% vs entrada</span>`:''}
           </div>
           <div class="ph-cols-header">
-            <span>Fecha</span><span>Acciones</span><span>Precio</span><span>Total USD</span>${livePrice>0?'<span>P&L</span>':''}
+            <span>Fecha</span><span>Unidades</span><span>Precio entrada</span><span>Total USD</span>${livePrice>0?'<span>P&L lote</span>':''}
           </div>
           ${rows}`:'<p class="ph-empty">Sin compras registradas.</p>'}
-        <button class="btn-small" style="margin-top:10px" onclick="openAddPurchaseModal('${inv.id}')">+ Agregar compra</button>
+        <button class="btn-small" style="margin-top:10px" onclick="openAddPurchaseModal('${inv.id}')">+ Registrar compra</button>
       </div>
     </div>`;
 }
@@ -1495,12 +1502,17 @@ function investmentCard(inv) {
   const hasShares = inv.shares > 0 && inv.purchasePrice > 0;
 
   // USD calculations
-  const investedUSD = hasShares ? inv.shares * inv.purchasePrice : Number(inv.invested);
+  const purchases   = state.investmentPurchases.filter(p=>p.investmentId===inv.id);
+  const totalShPur  = purchases.reduce((a,p)=>a+p.shares,0);
+  const avgCost     = totalShPur>0 ? purchases.reduce((a,p)=>a+p.shares*p.priceUSD,0)/totalShPur : (inv.purchasePrice||0);
+  const investedUSD = purchases.length>0 ? purchases.reduce((a,p)=>a+p.amountUSD,0) : (hasShares ? inv.shares * inv.purchasePrice : Number(inv.invested));
   const currentUSD  = hasShares && hasLive ? inv.shares * inv.marketPrice
-                    : hasShares ? inv.shares * inv.purchasePrice
+                    : hasShares ? inv.shares * (avgCost||inv.purchasePrice)
                     : Number(inv.currentValue);
   const pnlUSD = currentUSD - investedUSD;
   const pct    = investedUSD > 0 ? (pnlUSD / investedUSD * 100) : 0;
+  const isCrypto = inv.type === 'Criptomoneda';
+  const unitLabel = isCrypto ? 'uds.' : 'acc.';
 
   // Weight in portfolio (use USD)
   let totalCurUSD = 0;
@@ -1516,7 +1528,7 @@ function investmentCard(inv) {
           <div class="inv-name">
             ${inv.ticker?`<span class="inv-ticker">${inv.ticker}</span> `:''}${inv.name}
           </div>
-          <div class="inv-type">${inv.type} · ${weight.toFixed(1)}% del portafolio${inv.shares?` · ${inv.shares} acciones`:''}</div>
+          <div class="inv-type">${inv.type} · ${weight.toFixed(1)}% del portafolio${inv.shares?` · ${inv.shares} ${inv.type==='Criptomoneda'?'uds.':'acc.'}`:''}</div>
         </div>
         <div style="display:flex;gap:4px">
           <button class="action-btn" onclick='openEditInvestmentModal(${JSON.stringify({id:inv.id,name:inv.name,ticker:inv.ticker,type:inv.type,notes:inv.notes})})'>✏️</button>
@@ -1535,6 +1547,8 @@ function investmentCard(inv) {
         </div>
       ` : inv.ticker ? `<div class="live-price-row"><span style="color:var(--muted);font-size:13px">⏳ Cargando precio para ${inv.ticker}…</span></div>` : ''}
 
+      ${avgCost>0?`<div class="inv-cost-basis">Precio prom. entrada: <strong>${formatUSD(avgCost)}</strong>${hasLive&&avgCost>0?` · <span class="${inv.marketPrice>=avgCost?'profit':'loss'}">${((inv.marketPrice-avgCost)/avgCost*100)>=0?'+':''}${((inv.marketPrice-avgCost)/avgCost*100).toFixed(2)}% vs precio actual</span>`:''}
+      </div>`:''}
       <div class="pnl-row">
         <div class="pnl-item">
           <div class="pnl-label">Invertido</div>
