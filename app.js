@@ -860,8 +860,8 @@ function openInvestmentModal() {
         <div style="font-weight:600;margin-bottom:12px;color:var(--text)">📦 Primera compra</div>
         <div class="form-row">
           <div class="form-group" style="margin-bottom:8px">
-            <label class="form-label">Unidades / Acciones</label>
-            <input class="form-input" type="number" id="inv-shares" placeholder="0" min="0" step="any" oninput="calcInvestedFromShares()" required>
+            <label class="form-label">Cantidad (fracciones permitidas)</label>
+            <input class="form-input" type="number" id="inv-shares" placeholder="Ej: 0.5 ó 3.25" min="0" step="any" oninput="calcInvestedFromShares()" required>
           </div>
           <div class="form-group" style="margin-bottom:8px">
             <label class="form-label">Precio de entrada (USD)</label>
@@ -964,8 +964,8 @@ function openAddPurchaseModal(invId) {
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">Unidades / Acciones</label>
-          <input class="form-input" type="number" id="pur-shares" placeholder="0" min="0" step="any" oninput="calcPurchaseAmount()" required>
+          <label class="form-label">Cantidad (fracciones permitidas)</label>
+          <input class="form-input" type="number" id="pur-shares" placeholder="Ej: 0.5 ó 3.25" min="0" step="any" oninput="calcPurchaseAmount()" required>
         </div>
         <div class="form-group">
           <label class="form-label">Precio USD</label>
