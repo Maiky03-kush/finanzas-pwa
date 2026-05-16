@@ -184,15 +184,15 @@ async function refreshInvestmentPrices() {
   state.pricesLastUpdated = new Date();
   if (updated) {
     saveLocal();
-    // Sync updated currentValue back to Google Sheets (non-blocking)
     if (state.accessToken) {
+      // Update Inversiones!F (Valor Actual) with fresh prices
       for (const inv of state.investments) {
         if (inv.ticker && Number(inv.shares) > 0) {
-          try {
-            await updateRowById('Inversiones', inv.id, invArr(inv));
-          } catch(e) {}
+          try { await updateRowById('Inversiones', inv.id, invArr(inv)); } catch(e) {}
         }
       }
+      // Update Precios tab with latest marketPrice numbers (non-blocking)
+      syncPreciosTab().catch(() => {});
     }
   }
 }
@@ -278,14 +278,18 @@ async function handleTokenResponse(resp) {
   updateSyncBadge('Sincronizando…','syncing');
   await ensureSpreadsheet();
   await syncFromSheets();
-  await syncPreciosTab();
   updateSyncBadge('Sincronizado ✓','synced');
   renderView();
+  // Fetch live prices first, then write them to Precios tab so the sheet
+  // always gets fresh numbers instead of stale purchasePrice fallbacks
   if (state.investments.some(i => i.ticker)) {
     refreshInvestmentPrices().then(() => {
       updateSyncBadge('Sincronizado ✓','synced');
       if (state.view === 'investments') renderView();
+      syncPreciosTab();
     });
+  } else {
+    syncPreciosTab();
   }
 }
 
@@ -427,7 +431,7 @@ async function ensureComprasInvSheet() {
   } catch(e) {}
 }
 
-/* ── Precios sheet (GOOGLEFINANCE live prices) ───────────── */
+/* ── Precios sheet — bridge between app prices and sheet formulas ── */
 async function ensurePreciosSheet() {
   if (!state.spreadsheetId) return;
   try {
@@ -442,48 +446,35 @@ async function ensurePreciosSheet() {
     await gapi.client.sheets.spreadsheets.values.update({
       spreadsheetId: state.spreadsheetId, range: 'Precios!A1:C1',
       valueInputOption: 'RAW',
-      resource: { values: [['Ticker', 'Precio Live (GFIN)', 'Última actualización']] }
+      resource: { values: [['Ticker', 'Precio USD (Yahoo Finance)', 'Actualizado']] }
     });
   } catch(e) { console.warn('ensurePreciosSheet:', e); }
 }
 
-// Writes unique tickers to Precios!A and per-row GOOGLEFINANCE formulas to B.
-// Handles stocks (AAPL), ETFs (SCHD), and crypto pairs (ETH-USD → CURRENCY:ETHUSD).
-// The sheet then computes live prices automatically whenever it is opened.
+// Writes tickers + live prices (numbers, not formulas) to the Precios tab.
+// Using numbers avoids all Google Sheets locale issues with formula separators.
+// Prices come from Yahoo Finance (same source as the app UI).
+// Inversiones!L/M/N use VLOOKUP on this tab to show live values in the sheet.
 async function syncPreciosTab() {
   if (!state.spreadsheetId || !state.accessToken) return;
   const tickers = [...new Set(state.investments.filter(i => i.ticker).map(i => i.ticker))];
   if (!tickers.length) return;
   try {
     await ensurePreciosSheet();
-    // Clear old data (keep header)
     await gapi.client.sheets.spreadsheets.values.batchClear({
       spreadsheetId: state.spreadsheetId,
       resource: { ranges: ['Precios!A2:C'] }
     });
-    // Write tickers and GOOGLEFINANCE formulas row by row
-    const tickerValues  = tickers.map(t => [t]);
-    const formulaValues = tickers.map((t, i) => {
-      const row = i + 2;
-      // Crypto pairs like ETH-USD → CURRENCY:ETHUSD; stocks/ETFs pass through as-is
-      const gfinTicker = /^[A-Z]+-USD$/.test(t)
-        ? `"CURRENCY:${t.replace('-USD','USD')}"`
-        : `A${row}`;
-      return [
-        `=IFERROR(IF(REGEXMATCH(A${row},"-USD"),GOOGLEFINANCE("CURRENCY:"&REGEXREPLACE(A${row},"-USD","")&"USD","price"),GOOGLEFINANCE(A${row},"price")),"N/D")`,
-        `=NOW()`
-      ];
+    const now = new Date().toLocaleString('es-CO');
+    const rows = tickers.map(t => {
+      const inv = state.investments.find(i => i.ticker === t);
+      const price = inv?.marketPrice || inv?.purchasePrice || 0;
+      return [t, price, now];
     });
     await gapi.client.sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: state.spreadsheetId,
       resource: { valueInputOption: 'RAW', data: [
-        { range: 'Precios!A2:A', values: tickerValues }
-      ]}
-    });
-    await gapi.client.sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: state.spreadsheetId,
-      resource: { valueInputOption: 'USER_ENTERED', data: [
-        { range: 'Precios!B2:C', values: formulaValues }
+        { range: 'Precios!A2:C', values: rows }
       ]}
     });
   } catch(e) { console.warn('syncPreciosTab:', e); }
