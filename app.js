@@ -561,6 +561,66 @@ async function deleteInvestmentPurchase(purchaseId) {
   if (inv) { try { await updateRowById('Inversiones',inv.id,[inv.id,inv.name,inv.ticker||'',inv.type||'',inv.invested,inv.currentValue,inv.shares||0,inv.purchasePrice||0,inv.notes||'']); } catch(e) {} }
 }
 
+function openEditPurchaseModal(purchaseId) {
+  const p = state.investmentPurchases.find(x=>x.id===purchaseId);
+  if (!p) return;
+  const inv = state.investments.find(i=>i.id===p.investmentId);
+  openModal(`
+    <div class="modal-header">
+      <h2 class="modal-title">Editar compra</h2>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <p style="color:var(--muted);margin-bottom:16px;font-size:13px">${inv?.name||''} ${inv?.ticker?'('+inv.ticker+')':''}</p>
+    <form onsubmit="submitEditPurchase(event,'${purchaseId}')">
+      <div class="form-group">
+        <label class="form-label">Fecha de compra</label>
+        <input class="form-input" type="date" id="ep-date" value="${p.date}" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Monto invertido (USD)</label>
+          <input class="form-input" type="number" id="ep-amount" placeholder="Ej: 50.00" min="0" step="any" value="${p.amountUSD||''}" oninput="calcEditPurchase()" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Precio de entrada (USD)</label>
+          <input class="form-input" type="number" id="ep-price" placeholder="Ej: 191.50" min="0" step="any" value="${p.priceUSD||''}" oninput="calcEditPurchase()">
+        </div>
+      </div>
+      <div class="calc-hint" id="ep-hint"></div>
+      <button type="submit" class="btn-primary">Guardar cambios</button>
+    </form>`);
+  setTimeout(calcEditPurchase, 50);
+}
+function calcEditPurchase() {
+  const amount = Number(document.getElementById('ep-amount')?.value)||0;
+  const price  = Number(document.getElementById('ep-price')?.value)||0;
+  const hint   = document.getElementById('ep-hint');
+  if (hint) hint.textContent = amount>0 && price>0
+    ? `${formatUSD(amount)} ÷ ${formatUSD(price)} = ${Math.round(amount/price*1e8)/1e8} unidades ≈ ${formatCOP(amount*state.usdCopRate)}`
+    : '';
+}
+async function submitEditPurchase(e, purchaseId) {
+  e.preventDefault();
+  const amount = Number(document.getElementById('ep-amount').value)||0;
+  const price  = Number(document.getElementById('ep-price').value)||0;
+  if (amount <= 0) { alert('Ingresa el monto invertido.'); return; }
+  if (price  <= 0) { alert('Ingresa el precio de entrada.'); return; }
+  const shares = Math.round(amount / price * 1e8) / 1e8;
+  const p = state.investmentPurchases.find(x=>x.id===purchaseId);
+  if (!p) return;
+  p.date = document.getElementById('ep-date').value;
+  p.amountUSD = amount;
+  p.priceUSD  = price;
+  p.shares    = shares;
+  recalcInvestment(p.investmentId);
+  closeModal(); saveLocal(); renderView();
+  const inv = state.investments.find(i=>i.id===p.investmentId);
+  try {
+    await updateRowById('Compras_Inv', purchaseId, [purchaseId, p.investmentId, p.date, shares, price, amount]);
+    if (inv) await updateRowById('Inversiones', inv.id, [inv.id, inv.name, inv.ticker||'', inv.type||'', inv.invested, inv.currentValue, inv.shares||0, inv.purchasePrice||0, inv.notes||'']);
+  } catch(e) {}
+}
+
 function recalcInvestment(invId) {
   const inv = state.investments.find(i=>i.id===invId);
   if (!inv) return;
@@ -1501,6 +1561,7 @@ function purchaseHistorySection(inv) {
         <span class="ph-price">${formatUSD(p.priceUSD)}</span>
         <span class="ph-usd">${formatUSD(p.amountUSD||costUSD)}</span>
         ${livePrice>0?`<span class="ph-pnl ${lotPnlUSD>=0?'profit':'loss'}">${lotPnlUSD>=0?'+':''}${formatUSD(lotPnlUSD)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
+        <button class="ph-del-btn" onclick="openEditPurchaseModal('${p.id}')" title="Editar lote">✏️</button>
         <button class="ph-del-btn" onclick="deleteInvestmentPurchase('${p.id}')" title="Eliminar lote">🗑️</button>
       </div>`;
   }).join('');
