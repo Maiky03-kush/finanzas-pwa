@@ -1229,7 +1229,12 @@ function renderDashboard() {
    VIEW: TRANSACTIONS (toggle Gastos / Ingresos)
    ════════════════════════════════════════════════════════════ */
 function setTxFilter(type) { state.txFilter = type; renderTransactions(); }
-function setTxSearch(val) { state.txSearch = val; renderTransactions(); }
+function setTxSearch(val) {
+  state.txSearch = val;
+  renderTransactions();
+  const inp = document.getElementById('tx-search-input');
+  if (inp) { inp.value = val; inp.focus(); inp.setSelectionRange(val.length, val.length); }
+}
 
 function renderTransactions() {
   const filter   = state.txFilter;
@@ -1258,7 +1263,7 @@ function renderTransactions() {
     <div class="content-inner">
       <!-- Búsqueda -->
       <div class="tx-search-wrap">
-        <input class="tx-search-input" type="text" placeholder="🔍 Buscar por descripción o categoría…" value="${state.txSearch}" oninput="setTxSearch(this.value)">
+        <input id="tx-search-input" class="tx-search-input" type="text" placeholder="🔍 Buscar por descripción o categoría…" value="${state.txSearch}" oninput="setTxSearch(this.value)">
         ${state.txSearch ? `<button class="tx-search-clear" onclick="setTxSearch('')">✕</button>` : ''}
       </div>
       <!-- Toggle Gastos / Ingresos -->
