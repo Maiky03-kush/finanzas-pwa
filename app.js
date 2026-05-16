@@ -627,12 +627,16 @@ function openEditPurchaseModal(purchaseId) {
   const p = state.investmentPurchases.find(x=>x.id===purchaseId);
   if (!p) return;
   const inv = state.investments.find(i=>i.id===p.investmentId);
+  // If priceUSD=0 but we have a live market price, suggest it as default
+  const suggestedPrice = p.priceUSD || (inv?.marketPrice || '');
+  const priceIsEstimate = !p.priceUSD && inv?.marketPrice;
   openModal(`
     <div class="modal-header">
       <h2 class="modal-title">Editar compra</h2>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <p style="color:var(--muted);margin-bottom:16px;font-size:13px">${inv?.name||''} ${inv?.ticker?'('+inv.ticker+')':''}</p>
+    ${priceIsEstimate ? `<div class="inv-repair-banner" style="margin-bottom:14px">⚠️ Precio no registrado — ingresa el precio que pagaste. Como referencia, hoy vale <strong>${formatUSD(inv.marketPrice)}</strong>.</div>` : ''}
     <form onsubmit="submitEditPurchase(event,'${purchaseId}')">
       <div class="form-group">
         <label class="form-label">Fecha de compra</label>
@@ -645,7 +649,7 @@ function openEditPurchaseModal(purchaseId) {
         </div>
         <div class="form-group">
           <label class="form-label">Precio de entrada (USD)</label>
-          <input class="form-input" type="number" id="ep-price" placeholder="Ej: 191.50" min="0" step="any" value="${p.priceUSD||''}" oninput="calcEditPurchase()">
+          <input class="form-input" type="number" id="ep-price" placeholder="Ej: 191.50" min="0" step="any" value="${suggestedPrice}" oninput="calcEditPurchase()">
         </div>
       </div>
       <div class="calc-hint" id="ep-hint"></div>
@@ -1782,7 +1786,16 @@ function investmentCard(inv) {
       </div>
 
       ${inv.notes?`<div class="savings-notes">${inv.notes}</div>`:''}
-      ${!inv.shares?`<button class="btn-small" onclick="openUpdateValueModal('${inv.id}')">Actualizar valor manual</button>`:''}
+
+      ${inv.shares === 0 && investedUSD > 0 ? `
+        <div class="inv-repair-banner">
+          <div>
+            <strong>⚠️ Precio de compra sin registrar</strong><br>
+            <span>Invertiste ${formatUSD(investedUSD)}${hasLive ? ` · precio hoy: ${formatUSD(inv.marketPrice)}` : ''}. Ingresa el precio que pagaste para ver tu ganancia real.</span>
+          </div>
+          <button class="inv-repair-btn" onclick="openEditPurchaseModal('${(purchases[0]||{}).id||''}')">Corregir ✏️</button>
+        </div>
+      ` : ''}
 
       ${purchaseHistorySection(inv)}
     </div>`;

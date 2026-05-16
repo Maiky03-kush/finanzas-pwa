@@ -821,6 +821,35 @@ body {
 }
 .live-dot { color: #34C759; font-size: 12px; }
 
+/* ── Investment repair banner (shares=0) ─────────────────── */
+.inv-repair-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(245,158,11,0.1);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #f59e0b;
+}
+.inv-repair-banner strong { display: block; margin-bottom: 2px; font-size: 13px; }
+.inv-repair-banner span { color: var(--muted); font-size: 11px; }
+.inv-repair-btn {
+  flex-shrink: 0;
+  background: #f59e0b;
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 /* ── Purchase history delete button ─────────────────── */
 .ph-del-btn {
   background: none;
