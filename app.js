@@ -1169,31 +1169,48 @@ async function submitUpdateValue(e, id) {
 }
 function openEditInvestmentModal(inv) {
   const types = ['Acciones','ETF','Criptomoneda','Fondo de inversión','Bonos','CDT','Otro'];
+  const fullInv = state.investments.find(i=>i.id===inv.id) || inv;
   openModal(`
     <div class="modal-header">
       <h2 class="modal-title">Editar Inversión</h2>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <form onsubmit="submitEditInvestment(event,'${inv.id}')">
+    <form onsubmit="submitEditInvestment(event,'${fullInv.id}')">
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Ticker</label>
-          <input class="form-input" type="text" id="inv-edit-ticker" value="${inv.ticker||''}" style="text-transform:uppercase">
+          <input class="form-input" type="text" id="inv-edit-ticker" value="${fullInv.ticker||''}" style="text-transform:uppercase">
         </div>
         <div class="form-group">
           <label class="form-label">Nombre</label>
-          <input class="form-input" type="text" id="inv-edit-name" value="${inv.name||''}" required>
+          <input class="form-input" type="text" id="inv-edit-name" value="${fullInv.name||''}" required>
         </div>
       </div>
       <div class="form-group">
         <label class="form-label">Tipo</label>
         <select class="form-input" id="inv-edit-type">
-          ${types.map(t=>`<option value="${t}" ${inv.type===t?'selected':''}>${t}</option>`).join('')}
+          ${types.map(t=>`<option value="${t}" ${fullInv.type===t?'selected':''}>${t}</option>`).join('')}
         </select>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Valor Actual (USD)</label>
+          <input class="form-input" type="number" id="inv-edit-value" min="0" step="any"
+            value="${fullInv.currentValue||0}"
+            ${fullInv.ticker ? 'title="Se actualiza automáticamente con precios en vivo"' : ''}>
+          ${fullInv.ticker ? '<small style="color:var(--muted);font-size:11px">⚡ Se actualiza con precio en vivo</small>' : ''}
+        </div>
+        <div class="form-group">
+          <label class="form-label">Monto invertido (USD)</label>
+          <input class="form-input" type="number" id="inv-edit-invested" min="0" step="any"
+            value="${fullInv.invested||0}"
+            title="Calculado automáticamente desde tus compras">
+          <small style="color:var(--muted);font-size:11px">📋 Calculado desde compras</small>
+        </div>
       </div>
       <div class="form-group">
         <label class="form-label">Notas</label>
-        <input class="form-input" type="text" id="inv-edit-notes" value="${inv.notes||''}">
+        <input class="form-input" type="text" id="inv-edit-notes" value="${fullInv.notes||''}">
       </div>
       <button type="submit" class="btn-primary">Guardar cambios</button>
     </form>`);
@@ -1201,10 +1218,22 @@ function openEditInvestmentModal(inv) {
 async function submitEditInvestment(e, id) {
   e.preventDefault();
   const inv = state.investments.find(i=>i.id===id); if (!inv) return;
-  inv.ticker = document.getElementById('inv-edit-ticker').value.trim().toUpperCase();
-  inv.name   = document.getElementById('inv-edit-name').value.trim();
-  inv.type   = document.getElementById('inv-edit-type').value;
-  inv.notes  = document.getElementById('inv-edit-notes').value.trim();
+  inv.ticker       = document.getElementById('inv-edit-ticker').value.trim().toUpperCase();
+  inv.name         = document.getElementById('inv-edit-name').value.trim();
+  inv.type         = document.getElementById('inv-edit-type').value;
+  inv.notes        = document.getElementById('inv-edit-notes').value.trim();
+  const newValue   = Number(document.getElementById('inv-edit-value').value)||0;
+  const newInvested= Number(document.getElementById('inv-edit-invested').value)||0;
+  // Only apply manual overrides if there are no purchase lots driving the numbers
+  const hasPurchases = state.investmentPurchases.some(p=>p.investmentId===id);
+  if (!hasPurchases) {
+    inv.currentValue = newValue;
+    inv.invested     = newInvested;
+  } else {
+    // With purchases: always recalc invested from lots, but allow currentValue override
+    recalcInvestment(id);
+    inv.currentValue = newValue;
+  }
   closeModal(); saveLocal(); renderView();
   if (!state.accessToken) return;
   try { await updateRowById('Inversiones', id, invArr(inv)); } catch(e) {}
