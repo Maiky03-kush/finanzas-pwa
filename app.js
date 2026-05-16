@@ -320,6 +320,7 @@ async function ensureSpreadsheet() {
   });
   state.spreadsheetId = createResp.result.spreadsheetId;
   localStorage.setItem('finanzas_sheetId', state.spreadsheetId);
+  // Write plain-text headers (RAW) for all sheets
   await gapi.client.sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: state.spreadsheetId,
     resource:{ valueInputOption:'RAW', data:[
@@ -330,6 +331,17 @@ async function ensureSpreadsheet() {
       { range:'Suscripciones!A1:H1', values:[['ID','Nombre','Monto','Moneda','Frecuencia','ProximoPago','Categoria','Notas']] }
     ]}
   });
+  // Set ARRAYFORMULA for Inversiones calculated columns (J=Ganancia$, K=Ganancia%)
+  // These are the ONLY columns the app never writes — the sheet computes them automatically
+  try {
+    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: state.spreadsheetId,
+      resource:{ valueInputOption:'USER_ENTERED', data:[
+        { range:'Inversiones!J2', values:[['=ARRAYFORMULA(IF(A2:A="","",F2:F-E2:E))']] },
+        { range:'Inversiones!K2', values:[['=ARRAYFORMULA(IF(E2:E=0,"",IF(A2:A="","",(F2:F-E2:E)/E2:E*100)))']] }
+      ]}
+    });
+  } catch(e) { console.warn('ensureSpreadsheet ARRAYFORMULA:', e); }
 }
 
 async function ensureSuscripcionesSheet() {
@@ -368,8 +380,44 @@ async function ensureComprasInvSheet() {
   } catch(e) {}
 }
 
+/* ── Sheet formula migration ─────────────────────────────── */
+// Replaces raw Ganancia numbers in Inversiones!J:K with ARRAYFORMULA.
+// Called once per device via localStorage flag 'finanzas_formulas_v1'.
+async function migrateInversionesFormulas() {
+  if (!state.spreadsheetId || !state.accessToken) return;
+  try {
+    // 1. Clear any raw numbers previously written to J and K (all rows)
+    await gapi.client.sheets.spreadsheets.values.batchClear({
+      spreadsheetId: state.spreadsheetId,
+      resource: { ranges: ['Inversiones!J:K'] }
+    });
+    // 2. Restore plain-text headers in J1 and K1
+    await gapi.client.sheets.spreadsheets.values.update({
+      spreadsheetId: state.spreadsheetId,
+      range: 'Inversiones!J1:K1',
+      valueInputOption: 'RAW',
+      resource: { values: [['Ganancia $', 'Ganancia %']] }
+    });
+    // 3. Set ARRAYFORMULA in J2 and K2 so every row is auto-calculated
+    //    J = Valor Actual - Invertido
+    //    K = (Valor Actual - Invertido) / Invertido * 100  (% return)
+    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: state.spreadsheetId,
+      resource: { valueInputOption: 'USER_ENTERED', data: [
+        { range: 'Inversiones!J2', values: [['=ARRAYFORMULA(IF(A2:A="","",F2:F-E2:E))']] },
+        { range: 'Inversiones!K2', values: [['=ARRAYFORMULA(IF(E2:E=0,"",IF(A2:A="","",(F2:F-E2:E)/E2:E*100)))']] }
+      ]}
+    });
+  } catch(e) { console.warn('migrateInversionesFormulas:', e); }
+}
+
 async function syncFromSheets() {
   if (!state.spreadsheetId || !state.accessToken) return;
+  // One-time migration: turn Ganancia columns into sheet formulas
+  if (!localStorage.getItem('finanzas_formulas_v1')) {
+    await migrateInversionesFormulas();
+    localStorage.setItem('finanzas_formulas_v1', '1');
+  }
   try {
     const resp = await gapi.client.sheets.spreadsheets.values.batchGet({
       spreadsheetId: state.spreadsheetId,
@@ -512,12 +560,12 @@ async function markSubscriptionPaid(id) {
   try { await updateRowById('Suscripciones',id,[id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); } catch(e) {}
 }
 
-/* ── Investment row helper (includes Ganancia columns) ───── */
+/* ── Investment row helper ───────────────────────────────── */
+// Returns columns A-I only (J=Ganancia$, K=Ganancia% are managed
+// by ARRAYFORMULA in the sheet — never written by the app)
 function invArr(inv) {
-  const g = Math.round(((inv.currentValue||0) - (inv.invested||0)) * 100) / 100;
-  const p = (inv.invested||0) > 0 ? Math.round(g / inv.invested * 10000) / 100 : 0;
   return [inv.id, inv.name, inv.ticker||'', inv.type||'', inv.invested, inv.currentValue,
-          inv.shares||0, inv.purchasePrice||0, inv.notes||'', g, p];
+          inv.shares||0, inv.purchasePrice||0, inv.notes||''];
 }
 
 /* ── CRUD: Investments ───────────────────────────────────── */
