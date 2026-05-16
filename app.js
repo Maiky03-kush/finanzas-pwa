@@ -258,9 +258,8 @@ function checkReady() {
 
 async function handleTokenResponse(resp) {
   if (resp.error) {
-    // Silent re-auth failed (token expired or interaction required).
-    // Clear the flag so we don't loop on next load, then show reconnect UI.
-    localStorage.removeItem('finanzas_wasConnected');
+    // Keep wasConnected flag — next load should still attempt silent auth.
+    // Only show the banner so the user can manually reconnect if needed.
     showReconnectBanner();
     console.warn('Google auth error:', resp.error);
     return;
@@ -533,15 +532,31 @@ async function syncFromSheets() {
     const vrs = resp.result.valueRanges;
     state.transactions = (vrs[0].values||[]).map(r=>({ id:r[0]||uid(), date:r[1]||'', type:r[2]||'Gasto', category:r[3]||'Otros', description:r[4]||'', amount:Number(r[5])||0, paymentMethod:r[6]||'' })).filter(t=>t.date);
     state.savings      = (vrs[1].values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', goal:Number(r[2])||0, current:Number(r[3])||0, deadline:r[4]||'', notes:r[5]||'' })).filter(s=>s.name);
+    // Snapshot local investments before overwriting — used as fallback below
+    const prevInvestments = [...state.investments];
     state.investments = (vrs[2].values||[]).map(r => {
       const inv = { id:r[0]||uid(), name:r[1]||'', ticker:r[2]||'', type:r[3]||'',
         invested:Number(r[4])||0, currentValue:Number(r[5])||0,
         shares:Number(r[6])||0, purchasePrice:Number(r[7])||0, notes:r[8]||'' };
-      // Auto-repair: H (Precio Compra) is the source of truth.
-      // If Acciones=0 but Invertido>0 and Precio>0, recalculate shares = E/H
+      // Auto-repair: if shares=0 but invested>0 and purchasePrice>0 → recalculate
       if (inv.shares === 0 && inv.invested > 0 && inv.purchasePrice > 0) {
         inv.shares = Math.round(inv.invested / inv.purchasePrice * 1e8) / 1e8;
       }
+      // Fallback: if sheet still has zeros, restore from last good local state.
+      // This prevents a reconnect from wiping values the user already sees correctly.
+      const prev = prevInvestments.find(p => p.id === inv.id);
+      if (prev) {
+        if (inv.shares === 0 && prev.shares > 0)               inv.shares = prev.shares;
+        if (inv.purchasePrice === 0 && prev.purchasePrice > 0) inv.purchasePrice = prev.purchasePrice;
+        if (inv.currentValue === 0 && prev.currentValue > 0)   inv.currentValue = prev.currentValue;
+        // Carry over live market data — never stored in the sheet
+        if (prev.marketPrice)    inv.marketPrice    = prev.marketPrice;
+        if (prev.marketChange)   inv.marketChange   = prev.marketChange;
+        if (prev.marketChangePct)inv.marketChangePct= prev.marketChangePct;
+        if (prev.marketCurrency) inv.marketCurrency = prev.marketCurrency;
+      }
+      // Last resort: if currentValue is still 0 but invested>0, show cost basis
+      if (inv.currentValue === 0 && inv.invested > 0) inv.currentValue = inv.invested;
       return inv;
     }).filter(i=>i.name);
     try {
