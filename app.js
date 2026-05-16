@@ -374,21 +374,21 @@ async function ensureSpreadsheet() {
       { range:'Precios!A1:C1',       values:[['Ticker','Precio Live (GFIN)','Última actualización']] }
     ]}
   });
+  // Precios tab first so VLOOKUP formulas below don't get a #REF! on creation
+  await ensurePreciosSheet();
   // Sheet-managed formulas for Inversiones (app never writes to J:N)
-  // J=Ganancia$  K=Ganancia%  L=Precio GFIN  M=Valor GFIN$  N=Diferencia
   try {
     await gapi.client.sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: state.spreadsheetId,
       resource:{ valueInputOption:'USER_ENTERED', data:[
         { range:'Inversiones!J2', values:[['=ARRAYFORMULA(F2:F-E2:E)']] },
         { range:'Inversiones!K2', values:[['=ARRAYFORMULA((F2:F-E2:E)/(E2:E+(E2:E=0))*100)']] },
-        { range:'Inversiones!L2', values:[['=ARRAYFORMULA(IFERROR(VLOOKUP(C2:C,Precios!A:B,2,FALSE),""))']] },
-        { range:'Inversiones!M2', values:[['=ARRAYFORMULA(IF((G2:G>0)*(L2:L<>""),G2:G*L2:L,""))']] },
-        { range:'Inversiones!N2', values:[['=ARRAYFORMULA(IF((F2:F>0)*(M2:M<>""),M2:M-F2:F,""))']] }
+        { range:'Inversiones!L2', values:[['=ARRAYFORMULA(IFERROR(VLOOKUP(C2:C,Precios!$A:$B,2,0),""))']] },
+        { range:'Inversiones!M2', values:[['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0),""))']] },
+        { range:'Inversiones!N2', values:[['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0)-F2:F,""))']] }
       ]}
     });
   } catch(e) { console.warn('ensureSpreadsheet formulas:', e); }
-  await ensurePreciosSheet();
 }
 
 async function ensureSuscripcionesSheet() {
@@ -496,6 +496,8 @@ async function syncPreciosTab() {
 async function migrateInversionesFormulas() {
   if (!state.spreadsheetId || !state.accessToken) return;
   try {
+    // Precios tab must exist before writing VLOOKUP formulas that reference it
+    await ensurePreciosSheet();
     await gapi.client.sheets.spreadsheets.values.batchClear({
       spreadsheetId: state.spreadsheetId,
       resource: { ranges: ['Inversiones!J:N'] }
@@ -511,23 +513,26 @@ async function migrateInversionesFormulas() {
       resource: { valueInputOption: 'USER_ENTERED', data: [
         { range: 'Inversiones!J2', values: [['=ARRAYFORMULA(F2:F-E2:E)']] },
         { range: 'Inversiones!K2', values: [['=ARRAYFORMULA((F2:F-E2:E)/(E2:E+(E2:E=0))*100)']] },
-        { range: 'Inversiones!L2', values: [['=ARRAYFORMULA(IFERROR(VLOOKUP(C2:C,Precios!A:B,2,FALSE),""))']] },
-        { range: 'Inversiones!M2', values: [['=ARRAYFORMULA(IF((G2:G>0)*(L2:L<>""),G2:G*L2:L,""))']] },
-        { range: 'Inversiones!N2', values: [['=ARRAYFORMULA(IF((F2:F>0)*(M2:M<>""),M2:M-F2:F,""))']] }
+        // L: live price from Precios tab via VLOOKUP — IFERROR returns "" when ticker not in Precios yet
+        { range: 'Inversiones!L2', values: [['=ARRAYFORMULA(IFERROR(VLOOKUP(C2:C,Precios!$A:$B,2,0),""))']] },
+        // M: shares × live price — IFERROR handles missing price gracefully
+        { range: 'Inversiones!M2', values: [['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0),""))']] },
+        // N: delta between GFIN value and app-written value (validation column)
+        { range: 'Inversiones!N2', values: [['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0)-F2:F,""))']] }
       ]}
     });
-    await ensurePreciosSheet();
   } catch(e) { console.warn('migrateInversionesFormulas:', e); }
 }
 
 async function syncFromSheets() {
   if (!state.spreadsheetId || !state.accessToken) return;
-  // Migration v3: add L/M/N GOOGLEFINANCE columns + Precios tab (bumped from v2)
-  if (!localStorage.getItem('finanzas_formulas_v3')) {
+  // Migration v4: fix formula order (Precios tab first) + simplified M/N
+  if (!localStorage.getItem('finanzas_formulas_v4')) {
     localStorage.removeItem('finanzas_formulas_v1');
     localStorage.removeItem('finanzas_formulas_v2');
+    localStorage.removeItem('finanzas_formulas_v3');
     await migrateInversionesFormulas();
-    localStorage.setItem('finanzas_formulas_v3', '1');
+    localStorage.setItem('finanzas_formulas_v4', '1');
   }
   try {
     const resp = await gapi.client.sheets.spreadsheets.values.batchGet({
@@ -570,11 +575,14 @@ async function syncFromSheets() {
       for (const p of repairedPurchases) {
         try { await updateRowById('Compras_Inv', p.id, [p.id,p.investmentId,p.date,p.shares,p.priceUSD,p.amountUSD]); } catch(e) {}
       }
-      // Recalc and persist Inversiones rows with corrected shares
+      // Only recalc and persist investments whose purchases were actually repaired.
+      // Do NOT recalculate all investments — that would zero out shares for investments
+      // like SCHD/ETH-USD whose purchases have amountUSD=0 (user must fix manually).
       if (repairedPurchases.length > 0) {
-        state.investments.forEach(inv => recalcInvestment(inv.id));
+        const repairedInvIds = new Set(repairedPurchases.map(p => p.investmentId));
+        repairedInvIds.forEach(invId => recalcInvestment(invId));
         for (const inv of state.investments) {
-          if (inv.invested > 0) {
+          if (inv.invested > 0 && repairedInvIds.has(inv.id)) {
             try { await updateRowById('Inversiones', inv.id, invArr(inv)); } catch(e) {}
           }
         }
