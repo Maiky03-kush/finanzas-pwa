@@ -118,6 +118,52 @@ body {
 }
 .reconnect-banner button:active { opacity: .8; }
 
+/* ─── PORTFOLIO PANEL ─── */
+.portfolio-panel { padding: 16px; }
+
+.portfolio-totals {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.portfolio-stat { text-align: center; }
+.portfolio-stat-label { font-size: 11px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
+.portfolio-stat-value { font-size: 16px; font-weight: 700; line-height: 1.2; }
+.portfolio-stat-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.portfolio-stat-sub.income { color: var(--green); }
+.portfolio-stat-sub.expense { color: var(--red); }
+
+.portfolio-alloc {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.alloc-legend { flex: 1; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.alloc-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.alloc-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.alloc-label { flex: 1; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.alloc-pct { font-weight: 700; color: var(--text); min-width: 34px; text-align: right; }
+.alloc-val { color: var(--muted); font-size: 11px; min-width: 64px; text-align: right; }
+
+/* ─── STANDALONE LOGIN PROMPT ─── */
+.standalone-prompt {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+  z-index: 10;
+}
+.standalone-prompt-inner { display: flex; flex-direction: column; align-items: center; padding: 32px; }
+.standalone-connect-btn {
+  background: var(--blue); color: #fff;
+  border: none; border-radius: 14px;
+  padding: 14px 28px; font-size: 16px; font-weight: 600;
+  cursor: pointer; width: 100%; max-width: 260px;
+}
+.standalone-connect-btn:active { opacity: .85; }
+
 /* ─── BOTTOM NAV ─── */
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0;

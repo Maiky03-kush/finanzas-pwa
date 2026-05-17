@@ -34,29 +34,77 @@ if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
 }
 
-/* ── localStorage ────────────────────────────────────────── */
+/* ── IndexedDB (offline-first cache) ─────────────────────── */
+let _idb = null;
+function openIDB() {
+  if (_idb) return Promise.resolve(_idb);
+  return new Promise((res, rej) => {
+    const req = indexedDB.open('finanzas', 1);
+    req.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+    };
+    req.onsuccess = e => { _idb = e.target.result; res(_idb); };
+    req.onerror   = () => rej(req.error);
+  });
+}
+async function idbSet(key, value) {
+  try {
+    const db = await openIDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(value, key);
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+  } catch(e) {}
+}
+async function idbGet(key) {
+  try {
+    const db = await openIDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('kv', 'readonly');
+      const req = tx.objectStore('kv').get(key);
+      req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error);
+    });
+  } catch(e) { return null; }
+}
+
+/* ── localStorage + IndexedDB ────────────────────────────── */
 function saveLocal() {
   localStorage.setItem('finanzas_transactions', JSON.stringify(state.transactions));
   localStorage.setItem('finanzas_savings',      JSON.stringify(state.savings));
-  const invToSave = state.investments.map(({ marketPrice, marketChange, marketChangePct, marketCurrency, ...rest }) => rest);
+  const invToSave = state.investments.map(({ marketPrice, marketChange, marketChangePct, marketCurrency, marketName, marketExchange, ...rest }) => rest);
   localStorage.setItem('finanzas_investments',  JSON.stringify(invToSave));
   if (state.spreadsheetId) localStorage.setItem('finanzas_sheetId', state.spreadsheetId);
   localStorage.setItem('finanzas_inv_purchases', JSON.stringify(state.investmentPurchases));
   localStorage.setItem('finanzas_subscriptions', JSON.stringify(state.subscriptions));
   localStorage.setItem('finanzas_categories',    JSON.stringify(state.categories));
+  // Mirror critical data to IndexedDB so standalone PWA shares the same cache
+  idbSet('investments',  invToSave);
+  idbSet('transactions', state.transactions);
+  idbSet('savings',      state.savings);
+  idbSet('purchases',    state.investmentPurchases);
+  idbSet('sheetId',      state.spreadsheetId);
 }
 
-function loadLocal() {
+async function loadLocal() {
   try {
-    state.transactions       = JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
-    state.savings            = JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
-    state.investments        = JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
-    state.investmentPurchases= JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
-    state.subscriptions      = JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
-    state.spreadsheetId      = localStorage.getItem('finanzas_sheetId') || null;
+    // Prefer IndexedDB (shared across browser + standalone PWA on same origin)
+    const [idbInv, idbTx, idbSav, idbPur, idbSheetId] = await Promise.all([
+      idbGet('investments'), idbGet('transactions'), idbGet('savings'),
+      idbGet('purchases'),   idbGet('sheetId')
+    ]);
+    state.transactions        = idbTx  || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
+    state.savings             = idbSav || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
+    state.investments         = idbInv || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
+    state.investmentPurchases = idbPur || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
+    state.subscriptions       = JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
+    state.spreadsheetId       = idbSheetId || localStorage.getItem('finanzas_sheetId') || null;
     const savedCats = JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
     if (savedCats) state.categories = savedCats;
-  } catch(e) { state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = []; }
+  } catch(e) {
+    state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = [];
+  }
 }
 
 /* ── Formatters ──────────────────────────────────────────── */
@@ -117,6 +165,91 @@ function getPortfolioSummary() {
   const current  = state.investments.reduce((a,i)=>a+Number(i.currentValue)*rate,0);
   const pnl = current-invested;
   return { invested, current, pnl, pct: invested?(pnl/invested*100):0 };
+}
+
+function getPortfolioAllocation() {
+  const totals = {};
+  state.investments.forEach(i => {
+    const type = i.type || 'Otro';
+    totals[type] = (totals[type] || 0) + Number(i.currentValue || i.invested || 0);
+  });
+  const grand = Object.values(totals).reduce((a,v)=>a+v,0) || 1;
+  return Object.entries(totals)
+    .sort((a,b)=>b[1]-a[1])
+    .map(([label, value]) => ({ label, value, pct: value/grand*100 }));
+}
+
+function buildDonutSVG(segments) {
+  const COLORS = {
+    'Acciones':'#007AFF','ETF':'#34C759','Criptomoneda':'#FF9500',
+    'Bono':'#AF52DE','Fondo':'#5AC8FA','Otro':'#8E8E93'
+  };
+  const size = 110, sw = 22, r = (size-sw)/2, circ = 2*Math.PI*r;
+  let offset = 0;
+  const arcs = segments.map(seg => {
+    const dash = seg.pct/100*circ, gap = circ-dash;
+    const arc = `<circle cx="${size/2}" cy="${size/2}" r="${r}"
+      fill="none" stroke="${COLORS[seg.label]||'#8E8E93'}" stroke-width="${sw}"
+      stroke-linecap="butt"
+      stroke-dasharray="${dash.toFixed(2)} ${gap.toFixed(2)}"
+      stroke-dashoffset="${(-(offset/100)*circ).toFixed(2)}"
+      transform="rotate(-90 ${size/2} ${size/2})"/>`;
+    offset += seg.pct;
+    return arc;
+  });
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="flex-shrink:0">${arcs.join('')}</svg>`;
+}
+
+function renderPortfolioPanel() {
+  if (!state.investments.length) return '';
+  let totalInvUSD = 0, totalCurUSD = 0;
+  state.investments.forEach(i => {
+    const invUSD = i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : Number(i.invested);
+    const curUSD = i.shares>0&&i.marketPrice ? i.shares*i.marketPrice
+      : i.shares>0&&i.purchasePrice>0 ? i.shares*i.purchasePrice : Number(i.currentValue);
+    totalInvUSD += invUSD; totalCurUSD += curUSD;
+  });
+  const pnlUSD = totalCurUSD - totalInvUSD;
+  const pctUSD = totalInvUSD>0 ? pnlUSD/totalInvUSD*100 : 0;
+  const alloc  = getPortfolioAllocation();
+  const COLORS  = { 'Acciones':'#007AFF','ETF':'#34C759','Criptomoneda':'#FF9500','Bono':'#AF52DE','Fondo':'#5AC8FA','Otro':'#8E8E93' };
+
+  return `
+    <div class="section-header">
+      <span class="section-title">Portafolio</span>
+      <button class="section-link" onclick="navigate('investments')">Ver todo</button>
+    </div>
+    <div class="card portfolio-panel">
+      <div class="portfolio-totals">
+        <div class="portfolio-stat">
+          <div class="portfolio-stat-label">Valor actual</div>
+          <div class="portfolio-stat-value">${formatUSD(totalCurUSD)}</div>
+          <div class="portfolio-stat-sub">≈ ${formatCOP(totalCurUSD * state.usdCopRate)}</div>
+        </div>
+        <div class="portfolio-stat">
+          <div class="portfolio-stat-label">Invertido</div>
+          <div class="portfolio-stat-value">${formatUSD(totalInvUSD)}</div>
+        </div>
+        <div class="portfolio-stat">
+          <div class="portfolio-stat-label">P&amp;L</div>
+          <div class="portfolio-stat-value ${pnlUSD>=0?'income':'expense'}">${pnlUSD>=0?'+':''}${formatUSD(pnlUSD)}</div>
+          <div class="portfolio-stat-sub ${pctUSD>=0?'income':'expense'}">${pctUSD>=0?'+':''}${pctUSD.toFixed(2)}%</div>
+        </div>
+      </div>
+      ${alloc.length > 1 ? `
+      <div class="portfolio-alloc">
+        ${buildDonutSVG(alloc)}
+        <div class="alloc-legend">
+          ${alloc.map(s=>`
+            <div class="alloc-item">
+              <span class="alloc-dot" style="background:${COLORS[s.label]||'#8E8E93'}"></span>
+              <span class="alloc-label">${s.label}</span>
+              <span class="alloc-pct">${s.pct.toFixed(0)}%</span>
+              <span class="alloc-val">${formatUSD(s.value)}</span>
+            </div>`).join('')}
+        </div>
+      </div>` : ''}
+    </div>`;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -248,12 +381,40 @@ function gisLoaded() {
 }
 function checkReady() {
   if (state.gapiReady && state.gisReady) {
-    loadLocal();
-    renderView();
-    if (localStorage.getItem('finanzas_wasConnected') && state.tokenClient) {
-      state.tokenClient.requestAccessToken({ prompt: '' });
-    }
+    loadLocal().then(() => {
+      renderView();
+      const wasConnected = localStorage.getItem('finanzas_wasConnected');
+      if (wasConnected && state.tokenClient) {
+        state.tokenClient.requestAccessToken({ prompt: '' });
+      } else if (!wasConnected && isStandaloneMode()) {
+        showStandaloneLoginPrompt();
+      }
+    });
   }
+}
+
+function isStandaloneMode() {
+  return window.matchMedia('(display-mode: standalone)').matches || !!window.navigator.standalone;
+}
+
+function showStandaloneLoginPrompt() {
+  // In standalone PWA, if no prior session, show a prominent connect prompt
+  // instead of a blank screen — the user needs to tap once to start OAuth
+  let el = document.getElementById('standalone-prompt');
+  if (el) return;
+  el = document.createElement('div');
+  el.id = 'standalone-prompt';
+  el.className = 'standalone-prompt';
+  el.innerHTML = `
+    <div class="standalone-prompt-inner">
+      <div style="font-size:40px;margin-bottom:12px">📊</div>
+      <div style="font-weight:700;font-size:17px;margin-bottom:6px">Finanzas</div>
+      <div style="color:var(--muted);font-size:14px;margin-bottom:20px;text-align:center">Conecta tu cuenta Google<br>para sincronizar tus datos</div>
+      <button class="standalone-connect-btn" onclick="toggleAuth();document.getElementById('standalone-prompt').remove()">
+        Conectar con Google
+      </button>
+    </div>`;
+  document.getElementById('app-content').appendChild(el);
 }
 
 async function handleTokenResponse(resp) {
@@ -1543,28 +1704,7 @@ function renderDashboard() {
         </div>` : ''}
 
       <!-- Portafolio -->
-      ${state.investments.length ? `
-        <div class="section-header">
-          <span class="section-title">Portafolio</span>
-          <button class="section-link" onclick="navigate('investments')">Ver todo</button>
-        </div>
-        <div class="card" style="padding:0;overflow:hidden">
-          <table class="summary-table">
-            <thead><tr><th>Activo</th><th>Invertido</th><th>Valor actual</th><th>P&L</th></tr></thead>
-            <tbody>
-              ${state.investments.map(i=>{
-                const pnl = i.currentValue-i.invested;
-                const pct = i.invested>0?(pnl/i.invested*100):0;
-                return `<tr>
-                  <td><strong>${i.ticker||'—'}</strong> <span style="font-size:12px;color:var(--muted)">${i.name}</span></td>
-                  <td>${formatUSD(i.invested)}</td>
-                  <td>${formatUSD(i.currentValue)}</td>
-                  <td class="${pnl>=0?'col-income':'col-expense'}">${pnl>=0?'+':''}${formatUSD(pnl)}<br><small>${pct>=0?'+':''}${pct.toFixed(1)}%</small></td>
-                </tr>`;
-              }).join('')}
-            </tbody>
-          </table>
-        </div>` : ''}
+      ${renderPortfolioPanel()}
 
       <!-- Suscripciones próximas -->
       ${(() => {
