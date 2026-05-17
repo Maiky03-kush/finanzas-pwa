@@ -63,6 +63,18 @@ http.createServer((req, res) => {
     return;
   }
 
+  // ── /api/history?ticker=AAPL&range=1mo ─────────────────
+  if (url.pathname === '/api/history') {
+    const ticker = url.searchParams.get('ticker');
+    const range  = url.searchParams.get('range') || '1mo';
+    if (!ticker) { res.writeHead(400); res.end('Missing ticker'); return; }
+    yahooFetch(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${encodeURIComponent(range)}`,
+      res
+    );
+    return;
+  }
+
   // ── /api/search?q=apple ─────────────────────────────────
   if (url.pathname === '/api/search') {
     const q = url.searchParams.get('q');

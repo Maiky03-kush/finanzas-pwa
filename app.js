@@ -279,6 +279,72 @@ async function fetchQuote(ticker) {
   } catch(e) { return null; }
 }
 
+const _sparklineCache = {};
+
+async function fetchHistory(ticker, range = '1mo') {
+  const key = `${ticker}_${range}`;
+  const cached = _sparklineCache[key];
+  if (cached && Date.now() - cached.ts < 5 * 60 * 1000) return cached.prices;
+  try {
+    const r = await fetch(`/api/history?ticker=${encodeURIComponent(ticker)}&range=${range}`);
+    const data = await r.json();
+    const result = data?.chart?.result?.[0];
+    if (!result) return null;
+    const closes = result.indicators?.quote?.[0]?.close || [];
+    const prices = closes.filter(p => p != null);
+    if (prices.length < 2) return null;
+    _sparklineCache[key] = { prices, ts: Date.now() };
+    return prices;
+  } catch(e) { return null; }
+}
+
+function buildSparklineSVG(prices, ticker) {
+  const W = 280, H = 58, pad = 4;
+  const min = Math.min(...prices), max = Math.max(...prices);
+  const range = max - min || 1;
+  const isUp = prices[prices.length - 1] >= prices[0];
+  const color = isUp ? '#34C759' : '#FF3B30';
+  const fillId = `sf_${ticker.replace(/[^a-z0-9]/gi,'_')}`;
+
+  const toX = i  => pad + (i / (prices.length - 1)) * (W - pad * 2);
+  const toY = p  => H - pad - ((p - min) / range) * (H - pad * 2);
+
+  const pts = prices.map((p, i) => `${toX(i).toFixed(1)},${toY(p).toFixed(1)}`).join(' ');
+  const lastX = toX(prices.length - 1).toFixed(1);
+  const lastY = toY(prices[prices.length - 1]).toFixed(1);
+  const firstX = toX(0).toFixed(1), baseY = (H - pad).toFixed(1);
+
+  const changePct = ((prices[prices.length-1] - prices[0]) / prices[0] * 100);
+  const label = `${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}% 30d`;
+
+  return `
+    <div class="sparkline-wrap">
+      <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="${color}" stop-opacity="0.18"/>
+            <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+          </linearGradient>
+        </defs>
+        <polygon points="${firstX},${baseY} ${pts} ${lastX},${baseY}" fill="url(#${fillId})"/>
+        <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle cx="${lastX}" cy="${lastY}" r="3" fill="${color}"/>
+      </svg>
+      <div class="sparkline-meta">
+        <span class="sparkline-range">30 días</span>
+        <span class="sparkline-change" style="color:${color}">${label}</span>
+      </div>
+    </div>`;
+}
+
+async function loadSparkline(invId, ticker) {
+  const el = document.getElementById(`sparkline-${invId}`);
+  if (!el) return;
+  const prices = await fetchHistory(ticker);
+  if (!prices) { el.innerHTML = ''; return; }
+  el.outerHTML = buildSparklineSVG(prices, ticker);
+}
+
 async function fetchSearch(query) {
   try {
     const r = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
@@ -1963,6 +2029,13 @@ function renderInvestments() {
         ?`<p class="empty-state">Sin inversiones.<br>Toca + para agregar. Puedes buscar cualquier acción de NYSE, NASDAQ y más.</p>`
         :state.investments.map(investmentCard).join('')}
     </div>`;
+
+  // Load sparklines async after DOM is ready (only for investments with live price)
+  state.investments.forEach(inv => {
+    if (inv.ticker && inv.marketPrice != null) {
+      loadSparkline(inv.id, inv.ticker);
+    }
+  });
 }
 
 function purchaseHistorySection(inv) {
@@ -2064,6 +2137,9 @@ function investmentCard(inv) {
             (${changeUp?'+':''}${formatUSD(inv.marketChange||0)})
           </span>
           <span class="live-label">${inv.marketExchange||'Mercado'} · Precio en vivo</span>
+        </div>
+        <div id="sparkline-${inv.id}" class="sparkline-loading">
+          <span>Cargando gráfico…</span>
         </div>
       ` : inv.ticker ? `<div class="live-price-row"><span style="color:var(--muted);font-size:13px">⏳ Cargando precio para ${inv.ticker}…</span></div>` : ''}
 

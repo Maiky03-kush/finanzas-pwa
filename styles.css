@@ -644,6 +644,28 @@ body {
 .month-total.expense { color: var(--red); }
 .month-total.income  { color: var(--green); }
 
+/* ─── SPARKLINE ─── */
+.sparkline-loading {
+  display: flex; align-items: center; justify-content: center;
+  height: 58px; color: var(--muted); font-size: 12px;
+}
+.sparkline-wrap {
+  margin: 4px 0 8px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0,0,0,0.02);
+}
+@media (prefers-color-scheme: dark) {
+  .sparkline-wrap { background: rgba(255,255,255,0.04); }
+}
+.sparkline-meta {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 4px 8px 6px;
+  font-size: 11px;
+}
+.sparkline-range { color: var(--muted); }
+.sparkline-change { font-weight: 700; }
+
 /* ─── INVESTMENT: live price row ─── */
 .live-price-row {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
