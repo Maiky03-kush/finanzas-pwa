@@ -13,7 +13,7 @@ const CONFIG = {
 let state = {
   user: null, accessToken: null, spreadsheetId: null,
   transactions: [], savings: [], investments: [], investmentPurchases: [],
-  subscriptions: [], alerts: [],
+  subscriptions: [], alerts: [], snapshots: [],
   view: 'dashboard', syncing: false,
   tokenRefreshTimer: null,
   gapiReady: false, gisReady: false, tokenClient: null,
@@ -80,6 +80,7 @@ function saveLocal() {
   localStorage.setItem('finanzas_subscriptions', JSON.stringify(state.subscriptions));
   localStorage.setItem('finanzas_categories',    JSON.stringify(state.categories));
   localStorage.setItem('finanzas_alerts',        JSON.stringify(state.alerts));
+  localStorage.setItem('finanzas_snapshots',     JSON.stringify(state.snapshots));
   // Mirror critical data to IndexedDB so standalone PWA shares the same cache
   idbSet('investments',  invToSave);
   idbSet('transactions', state.transactions);
@@ -101,7 +102,8 @@ async function loadLocal() {
     state.investments         = idbInv || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
     state.investmentPurchases = idbPur || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
     state.subscriptions       = JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
-    state.alerts              = (await idbGet('alerts')) || JSON.parse(localStorage.getItem('finanzas_alerts') || '[]');
+    state.alerts              = (await idbGet('alerts'))     || JSON.parse(localStorage.getItem('finanzas_alerts')     || '[]');
+    state.snapshots           = (await idbGet('snapshots'))  || JSON.parse(localStorage.getItem('finanzas_snapshots')  || '[]');
     state.spreadsheetId       = idbSheetId || localStorage.getItem('finanzas_sheetId') || null;
     const savedCats = JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
     if (savedCats) state.categories = savedCats;
@@ -201,6 +203,109 @@ function buildDonutSVG(segments) {
     return arc;
   });
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="flex-shrink:0">${arcs.join('')}</svg>`;
+}
+
+function renderPatrimonioPanel() {
+  const rate       = state.usdCopRate || 4200;
+  const balanceCOP = getBalance();
+  let totalCurUSD  = 0, totalInvUSD = 0;
+  state.investments.forEach(i => {
+    totalInvUSD += i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.invested);
+    totalCurUSD += i.shares > 0 && i.marketPrice ? i.shares * i.marketPrice
+      : i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.currentValue);
+  });
+  const portfolioCOP  = totalCurUSD * rate;
+  const patrimonioCOP = balanceCOP + portfolioCOP;
+  const pnlCOP        = (totalCurUSD - totalInvUSD) * rate;
+
+  // Build mini sparkline from snapshots (patrimonio over time)
+  const snaps = state.snapshots.slice(-6); // last 6 months
+  let sparkHtml = '';
+  if (snaps.length >= 2) {
+    const vals = snaps.map(s => s.patrimonioCOP);
+    const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1;
+    const W = 260, H = 40, pad = 4;
+    const toX = i  => pad + (i / (vals.length - 1)) * (W - pad * 2);
+    const toY = v  => H - pad - ((v - mn) / rng) * (H - pad * 2);
+    const pts  = vals.map((v, i) => `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).join(' ');
+    const isUp = vals[vals.length - 1] >= vals[0];
+    const col  = isUp ? '#34C759' : '#FF3B30';
+    const fillId = 'pf_spark';
+    sparkHtml = `
+      <div class="patrimonio-spark">
+        <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="${col}" stop-opacity="0.15"/>
+              <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <polygon points="${toX(0).toFixed(1)},${(H-pad).toFixed(1)} ${pts} ${toX(vals.length-1).toFixed(1)},${(H-pad).toFixed(1)}" fill="url(#${fillId})"/>
+          <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+          <circle cx="${toX(vals.length-1).toFixed(1)}" cy="${toY(vals[vals.length-1]).toFixed(1)}" r="3" fill="${col}"/>
+        </svg>
+        <div class="patrimonio-spark-labels">
+          ${snaps.map(s => `<span>${s.month.slice(0,7).replace('-','/')}</span>`).join('')}
+        </div>
+      </div>`;
+  }
+
+  // Snapshot history table
+  let histHtml = '';
+  if (snaps.length >= 2) {
+    histHtml = `
+      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
+        <div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:8px">HISTORIAL MENSUAL</div>
+        <table class="summary-table">
+          <thead><tr><th>Mes</th><th>Portafolio</th><th>Balance</th><th>Patrimonio</th></tr></thead>
+          <tbody>
+            ${[...snaps].reverse().map((s, idx, arr) => {
+              const prev = arr[idx + 1];
+              const delta = prev ? s.patrimonioCOP - prev.patrimonioCOP : 0;
+              const label = new Date(s.month + '-02').toLocaleDateString('es-CO', { month: 'short', year: '2-digit' });
+              return `<tr>
+                <td>${label}</td>
+                <td>${formatCOP(s.portfolioUSD * rate)}</td>
+                <td>${formatCOP(s.balanceCOP)}</td>
+                <td>
+                  ${formatCOP(s.patrimonioCOP)}
+                  ${prev ? `<br><small class="${delta >= 0 ? 'col-income' : 'col-expense'}">${delta >= 0 ? '+' : ''}${formatCOP(delta)}</small>` : ''}
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  return `
+    <div class="section-header">
+      <span class="section-title">Patrimonio neto</span>
+    </div>
+    <div class="card patrimonio-card">
+      <div class="patrimonio-totals">
+        <div class="patrimonio-main">
+          <div class="patrimonio-label">Total patrimonio</div>
+          <div class="patrimonio-value">${formatCOP(patrimonioCOP)}</div>
+        </div>
+        <div class="patrimonio-breakdown">
+          <div class="patrimonio-item">
+            <span class="patrimonio-item-label">Balance (flujo)</span>
+            <span class="patrimonio-item-val">${formatCOP(balanceCOP)}</span>
+          </div>
+          <div class="patrimonio-item">
+            <span class="patrimonio-item-label">Portafolio</span>
+            <span class="patrimonio-item-val">${formatCOP(portfolioCOP)}</span>
+          </div>
+          <div class="patrimonio-item">
+            <span class="patrimonio-item-label">P&amp;L inversiones</span>
+            <span class="patrimonio-item-val ${pnlCOP >= 0 ? 'income' : 'expense'}">${pnlCOP >= 0 ? '+' : ''}${formatCOP(pnlCOP)}</span>
+          </div>
+        </div>
+      </div>
+      ${sparkHtml}
+      ${histHtml}
+    </div>`;
 }
 
 function renderPortfolioPanel() {
@@ -812,6 +917,80 @@ async function migrateInversionesFormulas() {
   } catch(e) { console.warn('migrateInversionesFormulas:', e); }
 }
 
+async function ensureSnapshotsSheet() {
+  if (!state.spreadsheetId) return;
+  try {
+    const meta = await gapi.client.sheets.spreadsheets.get({ spreadsheetId: state.spreadsheetId });
+    const exists = meta.result.sheets.some(s => s.properties.title === 'Snapshots');
+    if (!exists) {
+      await gapi.client.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: state.spreadsheetId,
+        resource: { requests: [{ addSheet: { properties: { title: 'Snapshots' } } }] }
+      });
+    }
+    await gapi.client.sheets.spreadsheets.values.update({
+      spreadsheetId: state.spreadsheetId, range: 'Snapshots!A1:F1',
+      valueInputOption: 'RAW',
+      resource: { values: [['Mes','Portfolio USD','Invertido USD','Balance COP','Patrimonio COP','Timestamp']] }
+    });
+  } catch(e) { console.warn('ensureSnapshotsSheet:', e); }
+}
+
+async function saveMonthlySnapshot() {
+  if (!state.spreadsheetId || !state.accessToken) return;
+  const monthKey = new Date().toISOString().slice(0, 7); // YYYY-MM
+  if (state.snapshots.some(s => s.month === monthKey)) return; // already saved this month
+
+  let totalInvUSD = 0, totalCurUSD = 0;
+  state.investments.forEach(i => {
+    totalInvUSD += i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.invested);
+    totalCurUSD += i.shares > 0 && i.marketPrice ? i.shares * i.marketPrice
+      : i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.currentValue);
+  });
+  const balanceCOP  = getBalance();
+  const rate        = state.usdCopRate || 4200;
+  const patrimonioCOP = balanceCOP + totalCurUSD * rate;
+  const snap = {
+    month: monthKey,
+    portfolioUSD: Math.round(totalCurUSD * 100) / 100,
+    investedUSD:  Math.round(totalInvUSD * 100) / 100,
+    balanceCOP:   Math.round(balanceCOP),
+    patrimonioCOP: Math.round(patrimonioCOP),
+    ts: new Date().toISOString()
+  };
+
+  state.snapshots.push(snap);
+  state.snapshots.sort((a, b) => a.month.localeCompare(b.month));
+  saveLocal();
+
+  try {
+    await ensureSnapshotsSheet();
+    await gapi.client.sheets.spreadsheets.values.append({
+      spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2',
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+      resource: { values: [[snap.month, snap.portfolioUSD, snap.investedUSD, snap.balanceCOP, snap.patrimonioCOP, snap.ts]] }
+    });
+  } catch(e) { console.warn('saveMonthlySnapshot:', e); }
+}
+
+async function loadSnapshots() {
+  if (!state.spreadsheetId || !state.accessToken) return;
+  try {
+    await ensureSnapshotsSheet();
+    const resp = await gapi.client.sheets.spreadsheets.values.get({
+      spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2:F'
+    });
+    const rows = resp.result.values || [];
+    if (rows.length === 0) return;
+    state.snapshots = rows.map(r => ({
+      month: r[0] || '', portfolioUSD: Number(r[1]) || 0,
+      investedUSD: Number(r[2]) || 0, balanceCOP: Number(r[3]) || 0,
+      patrimonioCOP: Number(r[4]) || 0, ts: r[5] || ''
+    })).filter(s => s.month);
+    saveLocal();
+  } catch(e) { console.warn('loadSnapshots:', e); }
+}
+
 async function syncFromSheets() {
   if (!state.spreadsheetId || !state.accessToken) return;
   // Migration v4: fix formula order (Precios tab first) + simplified M/N
@@ -899,6 +1078,9 @@ async function syncFromSheets() {
       state.subscriptions = (subResp.result.values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', amount:Number(r[2])||0, currency:r[3]||'COP', frequency:r[4]||'monthly', nextPaymentDate:r[5]||'', category:r[6]||'Servicios', notes:r[7]||'' })).filter(s=>s.name);
     } catch(e) { await ensureSuscripcionesSheet(); }
     saveLocal();
+    // Load snapshots from Sheet and save this month's if not yet saved
+    await loadSnapshots();
+    await saveMonthlySnapshot();
   } catch(e) { console.error('syncFromSheets', e); }
 }
 
@@ -1834,6 +2016,9 @@ function renderDashboard() {
         <div class="balance-amount">${formatCOP(balance)}</div>
         <div class="balance-sub">${formatCOP(portValue)} en portafolio · ${formatCOP(balance+portValue)} total patrimonio</div>
       </div>
+
+      <!-- Patrimonio neto -->
+      ${renderPatrimonioPanel()}
 
       <!-- Resumen mensual tabla -->
       <div class="section-header">
