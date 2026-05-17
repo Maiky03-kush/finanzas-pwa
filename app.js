@@ -410,7 +410,7 @@ function showStandaloneLoginPrompt() {
       <div style="font-size:40px;margin-bottom:12px">📊</div>
       <div style="font-weight:700;font-size:17px;margin-bottom:6px">Finanzas</div>
       <div style="color:var(--muted);font-size:14px;margin-bottom:20px;text-align:center">Conecta tu cuenta Google<br>para sincronizar tus datos</div>
-      <button class="standalone-connect-btn" onclick="toggleAuth();document.getElementById('standalone-prompt').remove()">
+      <button class="standalone-connect-btn" onclick="document.getElementById('standalone-prompt').remove();reconnectGoogle()">
         Conectar con Google
       </button>
     </div>`;
@@ -460,7 +460,7 @@ function showReconnectBanner() {
     b.id = 'reconnect-banner';
     b.className = 'reconnect-banner';
     b.innerHTML = '<span>⚠️ Sesión expirada — mostrando datos guardados localmente</span>'
-      + '<button onclick="toggleAuth()">Reconectar Google</button>';
+      + '<button onclick="reconnectGoogle()">Reconectar Google</button>';
     document.querySelector('.app-header').insertAdjacentElement('afterend', b);
   }
   b.style.display = 'flex';
@@ -470,6 +470,14 @@ function hideReconnectBanner() {
   const b = document.getElementById('reconnect-banner');
   if (b) b.style.display = 'none';
 }
+function reconnectGoogle() {
+  if (!state.tokenClient) { alert('Google aún no cargó, espera un segundo.'); return; }
+  // Always show the account picker when the user explicitly taps connect/reconnect.
+  // prompt:'' (silent) only works when Google already has an active session cookie —
+  // it fails in standalone PWA mode and after session expiry, leaving the user stuck.
+  state.tokenClient.requestAccessToken({ prompt: 'select_account' });
+}
+
 function toggleAuth() {
   if (state.accessToken) {
     google.accounts.oauth2.revoke(state.accessToken, ()=>{});
@@ -479,8 +487,7 @@ function toggleAuth() {
     hideReconnectBanner();
     updateAuthUI(false); updateSyncBadge('Local'); renderView();
   } else {
-    if (!state.tokenClient) { alert('Google aún no cargó, espera un segundo.'); return; }
-    state.tokenClient.requestAccessToken({ prompt:'' });
+    reconnectGoogle();
   }
 }
 function updateAuthUI(connected) {
