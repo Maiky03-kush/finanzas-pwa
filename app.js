@@ -13,7 +13,7 @@ const CONFIG = {
 let state = {
   user: null, accessToken: null, spreadsheetId: null,
   transactions: [], savings: [], investments: [], investmentPurchases: [],
-  subscriptions: [],
+  subscriptions: [], alerts: [],
   view: 'dashboard', syncing: false,
   tokenRefreshTimer: null,
   gapiReady: false, gisReady: false, tokenClient: null,
@@ -79,12 +79,14 @@ function saveLocal() {
   localStorage.setItem('finanzas_inv_purchases', JSON.stringify(state.investmentPurchases));
   localStorage.setItem('finanzas_subscriptions', JSON.stringify(state.subscriptions));
   localStorage.setItem('finanzas_categories',    JSON.stringify(state.categories));
+  localStorage.setItem('finanzas_alerts',        JSON.stringify(state.alerts));
   // Mirror critical data to IndexedDB so standalone PWA shares the same cache
   idbSet('investments',  invToSave);
   idbSet('transactions', state.transactions);
   idbSet('savings',      state.savings);
   idbSet('purchases',    state.investmentPurchases);
   idbSet('sheetId',      state.spreadsheetId);
+  idbSet('alerts',       state.alerts);
 }
 
 async function loadLocal() {
@@ -99,6 +101,7 @@ async function loadLocal() {
     state.investments         = idbInv || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
     state.investmentPurchases = idbPur || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
     state.subscriptions       = JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
+    state.alerts              = (await idbGet('alerts')) || JSON.parse(localStorage.getItem('finanzas_alerts') || '[]');
     state.spreadsheetId       = idbSheetId || localStorage.getItem('finanzas_sheetId') || null;
     const savedCats = JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
     if (savedCats) state.categories = savedCats;
@@ -360,6 +363,66 @@ async function fetchExchangeRate() {
   if (q && q.price > 100) state.usdCopRate = q.price;
 }
 
+/* ══════════════════════════════════════════════════════════
+   PRICE ALERTS
+   ══════════════════════════════════════════════════════════ */
+async function requestNotificationPermission() {
+  if (!('Notification' in window)) return false;
+  if (Notification.permission === 'granted') return true;
+  const result = await Notification.requestPermission();
+  return result === 'granted';
+}
+
+function fireNotification(title, body, tag) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const n = new Notification(title, { body, tag, icon: '/icon-192.png', badge: '/icon-192.png' });
+  n.onclick = () => { window.focus(); navigate('investments'); n.close(); };
+}
+
+function addAlert(alert) {
+  alert.id = uid();
+  alert.triggered = false;
+  alert.createdAt = todayISO();
+  state.alerts.push(alert);
+  saveLocal();
+}
+
+function deleteAlert(id) {
+  state.alerts = state.alerts.filter(a => a.id !== id);
+  saveLocal();
+  renderView();
+}
+
+function resetAlert(id) {
+  const a = state.alerts.find(a => a.id === id);
+  if (a) { a.triggered = false; saveLocal(); renderView(); }
+}
+
+function checkAlerts() {
+  let changed = false;
+  for (const alert of state.alerts) {
+    if (!alert.active || alert.triggered) continue;
+    const inv = state.investments.find(i => i.id === alert.invId);
+    if (!inv || !inv.marketPrice) continue;
+    const price = inv.marketPrice;
+    const hit = alert.condition === 'above' ? price >= alert.targetPrice
+                                            : price <= alert.targetPrice;
+    if (!hit) continue;
+    alert.triggered = true;
+    changed = true;
+    const dir = alert.condition === 'above' ? '▲ subió sobre' : '▼ bajó bajo';
+    fireNotification(
+      `${alert.ticker} ${dir} ${formatUSD(alert.targetPrice)}`,
+      `Precio actual: ${formatUSD(price)}`,
+      `alert_${alert.id}`
+    );
+  }
+  if (changed) {
+    saveLocal();
+    if (state.view === 'investments') renderView();
+  }
+}
+
 async function refreshInvestmentPrices() {
   await fetchExchangeRate();
   let updated = false;
@@ -381,6 +444,7 @@ async function refreshInvestmentPrices() {
     }
   }
   state.pricesLastUpdated = new Date();
+  checkAlerts();
   if (updated) {
     saveLocal();
     if (state.accessToken) {
@@ -1087,6 +1151,64 @@ function recalcInvestment(invId) {
 /* ── Modal ───────────────────────────────────────────────── */
 function openModal(html) { document.getElementById('modal-content').innerHTML=html; document.getElementById('modal-overlay').classList.remove('hidden'); }
 function closeModal()    { document.getElementById('modal-overlay').classList.add('hidden'); }
+
+async function openAlertModal(invId) {
+  const inv = state.investments.find(i => i.id === invId);
+  if (!inv) return;
+  const invAlerts = state.alerts.filter(a => a.invId === invId);
+  const currentPrice = inv.marketPrice ? formatUSD(inv.marketPrice) : '—';
+
+  await requestNotificationPermission();
+
+  openModal(`
+    <div class="modal-header">
+      <h3>🔔 Alertas — ${inv.ticker || inv.name}</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--muted);font-size:13px;margin-bottom:16px">Precio actual: <strong style="color:var(--text)">${currentPrice}</strong></p>
+
+      <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px">
+        <div class="form-group">
+          <label class="form-label">Condición</label>
+          <select id="alert-condition" class="form-input">
+            <option value="above">▲ Sube sobre</option>
+            <option value="below">▼ Baja bajo</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Precio target (USD)</label>
+          <input id="alert-price" type="number" step="0.01" min="0" class="form-input" placeholder="Ej: 180.00">
+        </div>
+        <button class="btn-primary" onclick="submitAlert('${invId}','${inv.ticker}')">Agregar alerta</button>
+      </div>
+
+      ${invAlerts.length ? `
+        <div style="border-top:1px solid var(--border);padding-top:14px">
+          <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:10px">ALERTAS ACTIVAS</div>
+          ${invAlerts.map(a => `
+            <div class="alert-row ${a.triggered ? 'triggered' : ''}">
+              <span class="alert-cond">${a.condition === 'above' ? '▲' : '▼'} ${formatUSD(a.targetPrice)}</span>
+              ${a.triggered
+                ? `<span class="alert-status fired">Disparada</span>
+                   <button class="alert-action" onclick="resetAlert('${a.id}');openAlertModal('${invId}')">↺ Reset</button>`
+                : `<span class="alert-status active">Activa</span>`}
+              <button class="alert-action danger" onclick="deleteAlert('${a.id}');openAlertModal('${invId}')">🗑️</button>
+            </div>`).join('')}
+        </div>` : ''}
+
+      ${Notification.permission === 'denied' ? `
+        <p style="color:var(--red);font-size:12px;margin-top:12px">⚠️ Notificaciones bloqueadas en este navegador. Actívalas en Ajustes del sitio.</p>` : ''}
+    </div>`);
+}
+
+function submitAlert(invId, ticker) {
+  const condition   = document.getElementById('alert-condition').value;
+  const targetPrice = parseFloat(document.getElementById('alert-price').value);
+  if (!targetPrice || targetPrice <= 0) { alert('Ingresa un precio válido'); return; }
+  addAlert({ invId, ticker, condition, targetPrice, active: true });
+  openAlertModal(invId);
+}
 function handleOverlayClick(e) { if (e.target===document.getElementById('modal-overlay')) closeModal(); }
 function openAddModal() {
   if (state.view === 'savings' && state.savingsSubTab === 'subs') return openSubscriptionModal();
@@ -2124,6 +2246,7 @@ function investmentCard(inv) {
           <div class="inv-type">${inv.type} · ${weight.toFixed(1)}% del portafolio${inv.shares?` · ${inv.shares} ${inv.type==='Criptomoneda'?'uds.':'acc.'}`:''}</div>
         </div>
         <div style="display:flex;gap:4px">
+          ${inv.ticker ? `<button class="action-btn alert-btn ${state.alerts.some(a=>a.invId===inv.id&&a.active&&!a.triggered)?'has-alert':''}" onclick="openAlertModal('${inv.id}')" title="Alertas de precio">🔔</button>` : ''}
           <button class="action-btn" onclick='openEditInvestmentModal(${JSON.stringify({id:inv.id,name:inv.name,ticker:inv.ticker,type:inv.type,notes:inv.notes})})'>✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('inv','${inv.id}')">🗑️</button>
         </div>

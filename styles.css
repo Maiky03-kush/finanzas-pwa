@@ -918,6 +918,33 @@ body {
 }
 .live-dot { color: #34C759; font-size: 12px; }
 
+/* ── Price Alerts ────────────────────────────────────────── */
+.alert-btn { position: relative; }
+.alert-btn.has-alert::after {
+  content: '';
+  position: absolute; top: 2px; right: 2px;
+  width: 7px; height: 7px;
+  background: var(--orange); border-radius: 50%;
+  border: 1.5px solid var(--card);
+}
+.alert-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 10px;
+  background: var(--bg); margin-bottom: 6px;
+}
+.alert-row.triggered { opacity: .6; }
+.alert-cond { flex: 1; font-size: 14px; font-weight: 600; }
+.alert-status { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 20px; }
+.alert-status.active  { background: rgba(52,199,89,.15); color: var(--green); }
+.alert-status.fired   { background: rgba(255,149,0,.15);  color: var(--orange); }
+.alert-action {
+  background: none; border: none; cursor: pointer;
+  font-size: 14px; padding: 4px; border-radius: 6px;
+  color: var(--muted);
+}
+.alert-action.danger { color: var(--red); }
+.alert-action:active { opacity: .7; }
+
 /* ── Investment repair banner (shares=0) ─────────────────── */
 .inv-repair-banner {
   display: flex;
