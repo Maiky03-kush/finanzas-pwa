@@ -1984,7 +1984,7 @@ function purchaseHistorySection(inv) {
       </div>`;
   }).join('');
 
-  const startExpanded = purchases.length > 0;
+  const startExpanded = false;
   return `
     <div class="ph-container">
       <div class="ph-header" onclick="togglePurchaseHistory('${inv.id}')">
