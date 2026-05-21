@@ -487,10 +487,20 @@ async function requestNotificationPermission() {
   return result === 'granted';
 }
 
-function fireNotification(title, body, tag) {
+async function showNotif(title, body, tag) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const n = new Notification(title, { body, tag, icon: '/icon-192.png', badge: '/icon-192.png' });
-  n.onclick = () => { window.focus(); navigate('investments'); n.close(); };
+  if ('serviceWorker' in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      await reg.showNotification(title, { body, tag, icon: '/icon-192.png', badge: '/icon-192.png', renotify: false });
+      return;
+    } catch(e) {}
+  }
+  try { new Notification(title, { body, tag, icon: '/icon-192.png', badge: '/icon-192.png' }); } catch(e) {}
+}
+
+function fireNotification(title, body, tag) {
+  showNotif(title, body, tag);
 }
 
 function addAlert(alert) {
@@ -987,7 +997,7 @@ async function loadSnapshots() {
   try {
     await ensureSnapshotsSheet();
     const resp = await gapi.client.sheets.spreadsheets.values.get({
-      spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2:F'
+      spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2:F', valueRenderOption: 'UNFORMATTED_VALUE'
     });
     const rows = resp.result.values || [];
     if (rows.length === 0) return;
@@ -1013,7 +1023,8 @@ async function syncFromSheets() {
   try {
     const resp = await gapi.client.sheets.spreadsheets.values.batchGet({
       spreadsheetId: state.spreadsheetId,
-      ranges:['Transacciones!A2:G','Ahorro!A2:F','Inversiones!A2:I']
+      ranges:['Transacciones!A2:G','Ahorro!A2:F','Inversiones!A2:I'],
+      valueRenderOption: 'UNFORMATTED_VALUE'
     });
     const vrs = resp.result.valueRanges;
     state.transactions = (vrs[0].values||[]).map(r=>({ id:r[0]||uid(), date:r[1]||'', type:r[2]||'Gasto', category:r[3]||'Otros', description:r[4]||'', amount:Number(r[5])||0, paymentMethod:r[6]||'' })).filter(t=>t.date);
@@ -1047,8 +1058,9 @@ async function syncFromSheets() {
     }).filter(i=>i.name);
     try {
       const purResp = await gapi.client.sheets.spreadsheets.values.get({
-        spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F'
+        spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F', valueRenderOption:'UNFORMATTED_VALUE'
       });
+      const repairedIds = new Set();
       state.investmentPurchases = (purResp.result.values||[]).map(r => {
         const p = { id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'',
           shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountUSD:Number(r[5])||0 };
@@ -1058,12 +1070,13 @@ async function syncFromSheets() {
           if (parent && parent.purchasePrice > 0) {
             p.priceUSD = parent.purchasePrice;
             p.shares   = Math.round(p.amountUSD / p.priceUSD * 1e8) / 1e8;
+            repairedIds.add(p.id);
           }
         }
         return p;
       }).filter(p=>p.investmentId);
-      // Write repairs back to Compras_Inv so they persist
-      const repairedPurchases = state.investmentPurchases.filter(p=>p.priceUSD>0 && p.shares>0);
+      // Write only actually-repaired purchases back to Compras_Inv so they persist
+      const repairedPurchases = state.investmentPurchases.filter(p => repairedIds.has(p.id));
       for (const p of repairedPurchases) {
         try { await updateRowById('Compras_Inv', p.id, [p.id,p.investmentId,p.date,p.shares,p.priceUSD,p.amountUSD]); } catch(e) {}
       }
@@ -1082,7 +1095,7 @@ async function syncFromSheets() {
     } catch(e) { await ensureComprasInvSheet(); }
     try {
       const subResp = await gapi.client.sheets.spreadsheets.values.get({
-        spreadsheetId:state.spreadsheetId, range:'Suscripciones!A2:H'
+        spreadsheetId:state.spreadsheetId, range:'Suscripciones!A2:H', valueRenderOption:'UNFORMATTED_VALUE'
       });
       state.subscriptions = (subResp.result.values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', amount:Number(r[2])||0, currency:r[3]||'COP', frequency:r[4]||'monthly', nextPaymentDate:r[5]||'', category:r[6]||'Servicios', notes:r[7]||'' })).filter(s=>s.name);
     } catch(e) { await ensureSuscripcionesSheet(); }
@@ -1202,8 +1215,12 @@ async function deleteSubscription(id) {
   if (!state.accessToken) return;
   try { await deleteRowById('Suscripciones',id); } catch(e) {}
 }
-async function markSubscriptionPaid(id) {
+async function markSubscriptionPaid(id, createTx = true) {
   const sub = state.subscriptions.find(s=>s.id===id); if (!sub) return;
+  if (createTx) {
+    await addTransaction({ date: todayISO(), type: 'Gasto', category: sub.category||'Servicios',
+      description: sub.name, amount: sub.amount, paymentMethod: '' });
+  }
   sub.nextPaymentDate = calcNextPaymentDate(sub.frequency, todayISO());
   saveLocal(); renderView();
   if (!state.accessToken) return;
@@ -1489,7 +1506,7 @@ async function submitTransaction(e, editId) {
         tx.description.toLowerCase().includes(s.name.toLowerCase()) ||
         s.name.toLowerCase().includes(tx.description.toLowerCase())
       );
-      if (matched) await markSubscriptionPaid(matched.id);
+      if (matched) await markSubscriptionPaid(matched.id, false);
     }
   }
 }
@@ -2269,7 +2286,7 @@ function renderSavings() {
           <span class="section-title">Mis suscripciones</span>
           <button class="section-link" onclick="openSubscriptionModal()">+ Nueva</button>
         </div>
-        ${Notification.permission !== 'granted' ? `
+        ${(typeof Notification === 'undefined' || Notification.permission !== 'granted') ? `
         <div class="notif-banner">
           <span>🔔 Activa recordatorios para recibir alertas un día antes de cada cobro.</span>
           <button class="btn-small" onclick="enableNotifications()">Activar</button>
@@ -2596,10 +2613,7 @@ function checkSubscriptionNotifications() {
       body  = `${sub.name} se cobra mañana por ${amtStr}`;
     }
 
-    try {
-      new Notification(title, { body, icon: '/icon-192.png', tag: notifKey, renotify: false });
-      localStorage.setItem(notifKey, '1');
-    } catch(e) {}
+    showNotif(title, body, notifKey).then(() => localStorage.setItem(notifKey, '1')).catch(()=>{});
   });
 }
 
