@@ -16,7 +16,8 @@ let state = {
   subscriptions: [], alerts: [], snapshots: [],
   view: 'dashboard', syncing: false,
   tokenRefreshTimer: null,
-  gapiReady: false, gisReady: false, tokenClient: null,
+  gapiReady: false,
+  globalPriceTimer: null,
   addType: 'Gasto', addPaymentMethod: 'Efectivo',
   txFilter: 'Gasto', txSearch: '',
   savingsSubTab: 'goals',
@@ -586,23 +587,14 @@ async function refreshInvestmentPrices() {
 
 /* ── Navigation ──────────────────────────────────────────── */
 function navigate(view) {
-  // Stop investment price refresh when leaving
-  if (state.view === 'investments' && view !== 'investments') {
-    clearInterval(state.priceRefreshTimer);
-    state.priceRefreshTimer = null;
-  }
   state.view = view;
   document.querySelectorAll('.nav-item').forEach(el =>
     el.classList.toggle('active', el.dataset.view === view));
 
   if (view === 'investments') {
-    // Refresh prices immediately then every 60s
+    // Refresh prices immediately on entering investments view
+    // (global 60s timer handles periodic refresh)
     refreshInvestmentPrices().then(() => { if (state.view==='investments') renderView(); });
-    if (!state.priceRefreshTimer) {
-      state.priceRefreshTimer = setInterval(() => {
-        refreshInvestmentPrices().then(() => { if (state.view==='investments') renderView(); });
-      }, 60000);
-    }
   } else {
     renderView();
   }
@@ -624,81 +616,76 @@ function updateSyncBadge(text, cls) {
 function gapiLoaded() {
   gapi.load('client', async () => {
     await gapi.client.init({ apiKey: CONFIG.API_KEY, discoveryDocs: CONFIG.DISCOVERY_DOCS });
-    state.gapiReady = true; checkReady();
+    state.gapiReady = true;
+    onGapiReady();
   });
 }
-function gisLoaded() {
-  state.tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: CONFIG.CLIENT_ID, scope: CONFIG.SCOPES, callback: handleTokenResponse
-  });
-  state.gisReady = true; checkReady();
-}
-function checkReady() {
-  if (state.gapiReady && state.gisReady) {
-    loadLocal().then(() => {
-      renderView();
-      const wasConnected = localStorage.getItem('finanzas_wasConnected');
-      if (wasConnected && state.tokenClient) {
-        state.tokenClient.requestAccessToken({ prompt: '' });
-      } else if (!wasConnected && isStandaloneMode()) {
-        showStandaloneLoginPrompt();
-      }
-    });
-  }
-}
+function gisLoaded() {} // GIS ya no se usa para auth — mantenemos el callback vacío por compatibilidad
 
-function isStandaloneMode() {
-  return window.matchMedia('(display-mode: standalone)').matches || !!window.navigator.standalone;
-}
-
-function showStandaloneLoginPrompt() {
-  // In standalone PWA, if no prior session, show a prominent connect prompt
-  // instead of a blank screen — the user needs to tap once to start OAuth
-  let el = document.getElementById('standalone-prompt');
-  if (el) return;
-  el = document.createElement('div');
-  el.id = 'standalone-prompt';
-  el.className = 'standalone-prompt';
-  el.innerHTML = `
-    <div class="standalone-prompt-inner">
-      <div style="font-size:40px;margin-bottom:12px">📊</div>
-      <div style="font-weight:700;font-size:17px;margin-bottom:6px">Finanzas</div>
-      <div style="color:var(--muted);font-size:14px;margin-bottom:20px;text-align:center">Conecta tu cuenta Google<br>para sincronizar tus datos</div>
-      <button class="standalone-connect-btn" onclick="document.getElementById('standalone-prompt').remove();reconnectGoogle()">
-        Conectar con Google
-      </button>
-    </div>`;
-  document.getElementById('app-content').appendChild(el);
-}
-
-async function handleTokenResponse(resp) {
-  if (resp.error) {
-    // Keep wasConnected flag — next load should still attempt silent auth.
-    // Only show the banner so the user can manually reconnect if needed.
-    showReconnectBanner();
-    console.warn('Google auth error:', resp.error);
+async function onGapiReady() {
+  await loadLocal();
+  renderView();
+  // Si vienen parámetros del OAuth callback, usarlos directamente
+  const urlParams = new URLSearchParams(window.location.search);
+  const cbToken  = urlParams.get('at');
+  const cbExpiry = urlParams.get('ei');
+  const cbError  = urlParams.get('auth_error');
+  if (cbToken) {
+    window.history.replaceState({}, '', '/');
+    await applyAccessToken(cbToken, Number(cbExpiry) || 3600);
     return;
   }
-  hideReconnectBanner();
-  state.accessToken = resp.access_token;
+  if (cbError) {
+    window.history.replaceState({}, '', '/');
+    showReconnectCard(`Error de autenticación: ${cbError}`);
+    return;
+  }
+  // Intentar obtener token del servidor
+  if (localStorage.getItem('finanzas_wasConnected')) {
+    await tryServerToken();
+  } else {
+    showReconnectCard();
+  }
+}
+
+async function tryServerToken() {
+  try {
+    const resp = await fetch('/auth/token');
+    if (resp.status === 401) { showReconnectCard(); return; }
+    const data = await resp.json();
+    if (data.error) { showReconnectCard(); return; }
+    await applyAccessToken(data.access_token, data.expires_in || 3600);
+  } catch(e) {
+    showReconnectCard();
+  }
+}
+
+async function applyAccessToken(token, expiresIn) {
+  state.accessToken = token;
+  gapi.client.setToken({ access_token: token });
   localStorage.setItem('finanzas_wasConnected', '1');
-  // Proactively renew the token 5 min before it expires (default 3600s)
+  hideReconnectCard();
+  // Renovar token 5 min antes de que expire
   clearTimeout(state.tokenRefreshTimer);
-  const renewIn = ((resp.expires_in || 3600) - 300) * 1000;
-  state.tokenRefreshTimer = setTimeout(() => {
-    if (state.tokenClient) state.tokenClient.requestAccessToken({ prompt: '' });
-  }, renewIn);
+  state.tokenRefreshTimer = setTimeout(() => tryServerToken(), (expiresIn - 300) * 1000);
+  // Timer global: refresh precios cada 60s sin importar la vista
+  clearInterval(state.globalPriceTimer);
+  state.globalPriceTimer = setInterval(() => {
+    if (state.investments.some(i => i.ticker)) {
+      refreshInvestmentPrices().then(() => {
+        if (state.view === 'investments' || state.view === 'dashboard') renderView();
+      });
+    }
+  }, 60000);
   updateAuthUI(true);
-  updateSyncBadge('Sincronizando…','syncing');
+  updateSyncBadge('Sincronizando…', 'syncing');
   await ensureSpreadsheet();
   await syncFromSheets();
-  updateSyncBadge('Sincronizado ✓','synced');
+  updateSyncBadge('Sincronizado ✓', 'synced');
   renderView();
-  // Fetch live prices first, then write them to Precios tab so the sheet
-  // always gets fresh numbers instead of stale purchasePrice fallbacks
   if (state.investments.some(i => i.ticker)) {
     refreshInvestmentPrices().then(() => {
-      updateSyncBadge('Sincronizado ✓','synced');
+      updateSyncBadge('Sincronizado ✓', 'synced');
       if (state.view === 'investments') renderView();
       syncPreciosTab();
     });
@@ -707,38 +694,40 @@ async function handleTokenResponse(resp) {
   }
 }
 
-function showReconnectBanner() {
-  let b = document.getElementById('reconnect-banner');
-  if (!b) {
-    b = document.createElement('div');
-    b.id = 'reconnect-banner';
-    b.className = 'reconnect-banner';
-    b.innerHTML = '<span>⚠️ Sesión expirada — mostrando datos guardados localmente</span>'
-      + '<button onclick="reconnectGoogle()">Reconectar Google</button>';
-    document.querySelector('.app-header').insertAdjacentElement('afterend', b);
-  }
-  b.style.display = 'flex';
+function showReconnectCard(msg) {
+  let el = document.getElementById('reconnect-card');
+  if (el) { if (msg) el.querySelector('.reconnect-msg').textContent = msg; return; }
+  el = document.createElement('div');
+  el.id = 'reconnect-card';
+  el.className = 'standalone-prompt';
+  el.innerHTML = `
+    <div class="standalone-prompt-inner">
+      <div style="font-size:40px;margin-bottom:12px">📊</div>
+      <div style="font-weight:700;font-size:17px;margin-bottom:6px">Finanzas</div>
+      <div class="reconnect-msg" style="color:var(--muted);font-size:14px;margin-bottom:20px;text-align:center">${msg || 'Conecta tu cuenta Google<br>para sincronizar tus datos'}</div>
+      <button class="standalone-connect-btn" onclick="reconnectGoogle()">Conectar con Google</button>
+    </div>`;
+  document.getElementById('app-content').prepend(el);
 }
 
-function hideReconnectBanner() {
-  const b = document.getElementById('reconnect-banner');
-  if (b) b.style.display = 'none';
+function hideReconnectCard() {
+  const el = document.getElementById('reconnect-card');
+  if (el) el.remove();
 }
+
 function reconnectGoogle() {
-  if (!state.tokenClient) { alert('Google aún no cargó, espera un segundo.'); return; }
-  // Always show the account picker when the user explicitly taps connect/reconnect.
-  // prompt:'' (silent) only works when Google already has an active session cookie —
-  // it fails in standalone PWA mode and after session expiry, leaving the user stuck.
-  state.tokenClient.requestAccessToken({ prompt: 'select_account' });
+  window.location.href = '/auth/login';
 }
 
 function toggleAuth() {
   if (state.accessToken) {
-    google.accounts.oauth2.revoke(state.accessToken, ()=>{});
+    fetch('/auth/revoke', { method: 'POST' }).catch(() => {});
     clearTimeout(state.tokenRefreshTimer);
+    clearInterval(state.globalPriceTimer);
+    clearInterval(state.priceRefreshTimer);
     state.accessToken = null; state.user = null;
     localStorage.removeItem('finanzas_wasConnected');
-    hideReconnectBanner();
+    hideReconnectCard();
     updateAuthUI(false); updateSyncBadge('Local'); renderView();
   } else {
     reconnectGoogle();
@@ -2644,10 +2633,11 @@ async function enableNotifications() {
 
 /* ── Boot ────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
-  loadLocal();
-  renderView();
-  // Chequear notificaciones si ya tienen permiso
-  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-    checkSubscriptionNotifications();
-  }
+  // Render cached data immediately while GAPI loads
+  loadLocal().then(() => {
+    renderView();
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      checkSubscriptionNotifications();
+    }
+  });
 });
