@@ -85,27 +85,31 @@ function saveLocal() {
   idbSet('investments',  invToSave);
   idbSet('transactions', state.transactions);
   idbSet('savings',      state.savings);
-  idbSet('purchases',    state.investmentPurchases);
-  idbSet('sheetId',      state.spreadsheetId);
-  idbSet('alerts',       state.alerts);
+  idbSet('purchases',     state.investmentPurchases);
+  idbSet('sheetId',       state.spreadsheetId);
+  idbSet('alerts',        state.alerts);
+  idbSet('snapshots',     state.snapshots);
+  idbSet('subscriptions', state.subscriptions);
+  idbSet('categories',    state.categories);
 }
 
 async function loadLocal() {
   try {
-    // Prefer IndexedDB (shared across browser + standalone PWA on same origin)
-    const [idbInv, idbTx, idbSav, idbPur, idbSheetId] = await Promise.all([
+    const [idbInv, idbTx, idbSav, idbPur, idbSheetId, idbAlerts, idbSnaps, idbSubs, idbCats] = await Promise.all([
       idbGet('investments'), idbGet('transactions'), idbGet('savings'),
-      idbGet('purchases'),   idbGet('sheetId')
+      idbGet('purchases'),   idbGet('sheetId'),
+      idbGet('alerts'),      idbGet('snapshots'),
+      idbGet('subscriptions'), idbGet('categories')
     ]);
-    state.transactions        = idbTx  || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
-    state.savings             = idbSav || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
-    state.investments         = idbInv || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
-    state.investmentPurchases = idbPur || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
-    state.subscriptions       = JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
-    state.alerts              = (await idbGet('alerts'))     || JSON.parse(localStorage.getItem('finanzas_alerts')     || '[]');
-    state.snapshots           = (await idbGet('snapshots'))  || JSON.parse(localStorage.getItem('finanzas_snapshots')  || '[]');
+    state.transactions        = idbTx     || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
+    state.savings             = idbSav    || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
+    state.investments         = idbInv    || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
+    state.investmentPurchases = idbPur    || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
+    state.subscriptions       = idbSubs   || JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
+    state.alerts              = idbAlerts || JSON.parse(localStorage.getItem('finanzas_alerts')        || '[]');
+    state.snapshots           = idbSnaps  || JSON.parse(localStorage.getItem('finanzas_snapshots')     || '[]');
     state.spreadsheetId       = idbSheetId || localStorage.getItem('finanzas_sheetId') || null;
-    const savedCats = JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
+    const savedCats = idbCats || JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
     if (savedCats) state.categories = savedCats;
   } catch(e) {
     state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = [];
@@ -165,11 +169,16 @@ function getMonthlyHistory(n=6) {
 function getAvgMonthlyIncome()  { const h=getMonthlyHistory().filter(m=>m.income>0);  return h.length?h.reduce((a,m)=>a+m.income,0)/h.length:0; }
 function getAvgMonthlyExpense() { const h=getMonthlyHistory().filter(m=>m.expense>0); return h.length?h.reduce((a,m)=>a+m.expense,0)/h.length:0; }
 function getPortfolioSummary() {
-  const rate     = state.usdCopRate || 1;
-  const invested = state.investments.reduce((a,i)=>a+Number(i.invested)*rate,0);
-  const current  = state.investments.reduce((a,i)=>a+Number(i.currentValue)*rate,0);
-  const pnl = current-invested;
-  return { invested, current, pnl, pct: invested?(pnl/invested*100):0 };
+  const rate = state.usdCopRate || 1;
+  let investedUSD = 0, currentUSD = 0;
+  state.investments.forEach(i => {
+    investedUSD += i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.invested);
+    currentUSD  += i.shares > 0 && i.marketPrice ? i.shares * i.marketPrice
+                 : i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.currentValue);
+  });
+  const invested = investedUSD * rate, current = currentUSD * rate;
+  const pnl = current - invested;
+  return { invested, current, pnl, pct: invested ? (pnl / invested * 100) : 0 };
 }
 
 function getPortfolioAllocation() {
@@ -1379,7 +1388,7 @@ async function openAlertModal(invId) {
             </div>`).join('')}
         </div>` : ''}
 
-      ${Notification.permission === 'denied' ? `
+      ${typeof Notification !== 'undefined' && Notification.permission === 'denied' ? `
         <p style="color:var(--red);font-size:12px;margin-top:12px">⚠️ Notificaciones bloqueadas en este navegador. Actívalas en Ajustes del sitio.</p>` : ''}
     </div>`);
 }
@@ -1644,7 +1653,7 @@ function subscriptionCard(sub) {
           </div>
         </div>
         <div class="sub-actions-row">
-          <button class="action-btn" onclick='openSubscriptionModal(${JSON.stringify(sub)})'>✏️</button>
+          <button class="action-btn" onclick="editSubscription('${sub.id}')">✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('sub','${sub.id}')">🗑️</button>
         </div>
       </div>
@@ -1995,6 +2004,12 @@ async function doDelete(entity, id) {
   if (entity==='sub')     await deleteSubscription(id);
 }
 
+/* ── ID-based edit wrappers (avoid JSON.stringify in onclick) ── */
+function editTransaction(id)  { openTransactionModal(state.transactions.find(t => t.id === id)); }
+function editSavings(id)      { openEditSavingsModal(state.savings.find(s => s.id === id)); }
+function editSubscription(id) { openSubscriptionModal(state.subscriptions.find(s => s.id === id)); }
+function editInvestment(id)   { openEditInvestmentModal(state.investments.find(i => i.id === id)); }
+
 /* ════════════════════════════════════════════════════════════
    VIEW: DASHBOARD
    ════════════════════════════════════════════════════════════ */
@@ -2204,7 +2219,7 @@ function txCard(t, showActions=false) {
       <div class="tx-right">
         <div class="tx-amount ${isExp?'expense':'income'}">${isExp?'-':'+'}${formatCOP(t.amount)}</div>
         ${showActions?`<div class="tx-actions">
-          <button class="action-btn" onclick='openTransactionModal(${JSON.stringify(t)})'>✏️</button>
+          <button class="action-btn" onclick="editTransaction('${t.id}')">✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('tx','${t.id}')">🗑️</button>
         </div>`:''}
       </div>
@@ -2279,7 +2294,7 @@ function savingsCard(s) {
           ${s.deadline?`<div class="savings-deadline">${daysLeft!==null&&daysLeft>=0?daysLeft+' días restantes':'Vencida'} · ${dateStr(s.deadline)}</div>`:''}
         </div>
         <div style="display:flex;gap:4px">
-          <button class="action-btn" onclick='openEditSavingsModal(${JSON.stringify(s)})'>✏️</button>
+          <button class="action-btn" onclick="editSavings('${s.id}')">✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('savings','${s.id}')">🗑️</button>
         </div>
       </div>
@@ -2432,7 +2447,7 @@ function investmentCard(inv) {
         </div>
         <div style="display:flex;gap:4px">
           ${inv.ticker ? `<button class="action-btn alert-btn ${state.alerts.some(a=>a.invId===inv.id&&a.active&&!a.triggered)?'has-alert':''}" onclick="openAlertModal('${inv.id}')" title="Alertas de precio">🔔</button>` : ''}
-          <button class="action-btn" onclick='openEditInvestmentModal(${JSON.stringify({id:inv.id,name:inv.name,ticker:inv.ticker,type:inv.type,notes:inv.notes})})'>✏️</button>
+          <button class="action-btn" onclick="editInvestment('${inv.id}')">✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('inv','${inv.id}')">🗑️</button>
         </div>
       </div>
@@ -2555,13 +2570,6 @@ function renderProjection() {
 /* ════════════════════════════════════════════════════════════
    WEB NOTIFICATIONS — recordatorios de suscripciones
    ════════════════════════════════════════════════════════════ */
-async function requestNotifPermission() {
-  if (!('Notification' in window)) return false;
-  if (Notification.permission === 'granted') return true;
-  if (Notification.permission === 'denied') return false;
-  const result = await Notification.requestPermission();
-  return result === 'granted';
-}
 
 function checkSubscriptionNotifications() {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -2596,7 +2604,7 @@ function checkSubscriptionNotifications() {
 }
 
 async function enableNotifications() {
-  const granted = await requestNotifPermission();
+  const granted = await requestNotificationPermission();
   if (granted) {
     checkSubscriptionNotifications();
     renderView();
