@@ -16,7 +16,8 @@ let state = {
   subscriptions: [], alerts: [], snapshots: [],
   view: 'dashboard', syncing: false,
   tokenRefreshTimer: null,
-  gapiReady: false, gisReady: false, tokenClient: null,
+  gapiReady: false,
+  globalPriceTimer: null,
   addType: 'Gasto', addPaymentMethod: 'Efectivo',
   txFilter: 'Gasto', txSearch: '',
   savingsSubTab: 'goals',
@@ -85,27 +86,31 @@ function saveLocal() {
   idbSet('investments',  invToSave);
   idbSet('transactions', state.transactions);
   idbSet('savings',      state.savings);
-  idbSet('purchases',    state.investmentPurchases);
-  idbSet('sheetId',      state.spreadsheetId);
-  idbSet('alerts',       state.alerts);
+  idbSet('purchases',     state.investmentPurchases);
+  idbSet('sheetId',       state.spreadsheetId);
+  idbSet('alerts',        state.alerts);
+  idbSet('snapshots',     state.snapshots);
+  idbSet('subscriptions', state.subscriptions);
+  idbSet('categories',    state.categories);
 }
 
 async function loadLocal() {
   try {
-    // Prefer IndexedDB (shared across browser + standalone PWA on same origin)
-    const [idbInv, idbTx, idbSav, idbPur, idbSheetId] = await Promise.all([
+    const [idbInv, idbTx, idbSav, idbPur, idbSheetId, idbAlerts, idbSnaps, idbSubs, idbCats] = await Promise.all([
       idbGet('investments'), idbGet('transactions'), idbGet('savings'),
-      idbGet('purchases'),   idbGet('sheetId')
+      idbGet('purchases'),   idbGet('sheetId'),
+      idbGet('alerts'),      idbGet('snapshots'),
+      idbGet('subscriptions'), idbGet('categories')
     ]);
-    state.transactions        = idbTx  || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
-    state.savings             = idbSav || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
-    state.investments         = idbInv || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
-    state.investmentPurchases = idbPur || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
-    state.subscriptions       = JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
-    state.alerts              = (await idbGet('alerts'))     || JSON.parse(localStorage.getItem('finanzas_alerts')     || '[]');
-    state.snapshots           = (await idbGet('snapshots'))  || JSON.parse(localStorage.getItem('finanzas_snapshots')  || '[]');
+    state.transactions        = idbTx     || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
+    state.savings             = idbSav    || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
+    state.investments         = idbInv    || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
+    state.investmentPurchases = idbPur    || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
+    state.subscriptions       = idbSubs   || JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
+    state.alerts              = idbAlerts || JSON.parse(localStorage.getItem('finanzas_alerts')        || '[]');
+    state.snapshots           = idbSnaps  || JSON.parse(localStorage.getItem('finanzas_snapshots')     || '[]');
     state.spreadsheetId       = idbSheetId || localStorage.getItem('finanzas_sheetId') || null;
-    const savedCats = JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
+    const savedCats = idbCats || JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
     if (savedCats) state.categories = savedCats;
   } catch(e) {
     state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = [];
@@ -165,11 +170,16 @@ function getMonthlyHistory(n=6) {
 function getAvgMonthlyIncome()  { const h=getMonthlyHistory().filter(m=>m.income>0);  return h.length?h.reduce((a,m)=>a+m.income,0)/h.length:0; }
 function getAvgMonthlyExpense() { const h=getMonthlyHistory().filter(m=>m.expense>0); return h.length?h.reduce((a,m)=>a+m.expense,0)/h.length:0; }
 function getPortfolioSummary() {
-  const rate     = state.usdCopRate || 1;
-  const invested = state.investments.reduce((a,i)=>a+Number(i.invested)*rate,0);
-  const current  = state.investments.reduce((a,i)=>a+Number(i.currentValue)*rate,0);
-  const pnl = current-invested;
-  return { invested, current, pnl, pct: invested?(pnl/invested*100):0 };
+  const rate = state.usdCopRate || 1;
+  let investedUSD = 0, currentUSD = 0;
+  state.investments.forEach(i => {
+    investedUSD += i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.invested);
+    currentUSD  += i.shares > 0 && i.marketPrice ? i.shares * i.marketPrice
+                 : i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.currentValue);
+  });
+  const invested = investedUSD * rate, current = currentUSD * rate;
+  const pnl = current - invested;
+  return { invested, current, pnl, pct: invested ? (pnl / invested * 100) : 0 };
 }
 
 function getPortfolioAllocation() {
@@ -478,10 +488,20 @@ async function requestNotificationPermission() {
   return result === 'granted';
 }
 
-function fireNotification(title, body, tag) {
+async function showNotif(title, body, tag) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const n = new Notification(title, { body, tag, icon: '/icon-192.png', badge: '/icon-192.png' });
-  n.onclick = () => { window.focus(); navigate('investments'); n.close(); };
+  if ('serviceWorker' in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      await reg.showNotification(title, { body, tag, icon: '/icon-192.png', badge: '/icon-192.png', renotify: false });
+      return;
+    } catch(e) {}
+  }
+  try { new Notification(title, { body, tag, icon: '/icon-192.png', badge: '/icon-192.png' }); } catch(e) {}
+}
+
+function fireNotification(title, body, tag) {
+  showNotif(title, body, tag);
 }
 
 function addAlert(alert) {
@@ -567,23 +587,14 @@ async function refreshInvestmentPrices() {
 
 /* ── Navigation ──────────────────────────────────────────── */
 function navigate(view) {
-  // Stop investment price refresh when leaving
-  if (state.view === 'investments' && view !== 'investments') {
-    clearInterval(state.priceRefreshTimer);
-    state.priceRefreshTimer = null;
-  }
   state.view = view;
   document.querySelectorAll('.nav-item').forEach(el =>
     el.classList.toggle('active', el.dataset.view === view));
 
   if (view === 'investments') {
-    // Refresh prices immediately then every 60s
+    // Refresh prices immediately on entering investments view
+    // (global 60s timer handles periodic refresh)
     refreshInvestmentPrices().then(() => { if (state.view==='investments') renderView(); });
-    if (!state.priceRefreshTimer) {
-      state.priceRefreshTimer = setInterval(() => {
-        refreshInvestmentPrices().then(() => { if (state.view==='investments') renderView(); });
-      }, 60000);
-    }
   } else {
     renderView();
   }
@@ -605,81 +616,76 @@ function updateSyncBadge(text, cls) {
 function gapiLoaded() {
   gapi.load('client', async () => {
     await gapi.client.init({ apiKey: CONFIG.API_KEY, discoveryDocs: CONFIG.DISCOVERY_DOCS });
-    state.gapiReady = true; checkReady();
+    state.gapiReady = true;
+    onGapiReady();
   });
 }
-function gisLoaded() {
-  state.tokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: CONFIG.CLIENT_ID, scope: CONFIG.SCOPES, callback: handleTokenResponse
-  });
-  state.gisReady = true; checkReady();
-}
-function checkReady() {
-  if (state.gapiReady && state.gisReady) {
-    loadLocal().then(() => {
-      renderView();
-      const wasConnected = localStorage.getItem('finanzas_wasConnected');
-      if (wasConnected && state.tokenClient) {
-        state.tokenClient.requestAccessToken({ prompt: '' });
-      } else if (!wasConnected && isStandaloneMode()) {
-        showStandaloneLoginPrompt();
-      }
-    });
-  }
-}
+function gisLoaded() {} // GIS ya no se usa para auth — mantenemos el callback vacío por compatibilidad
 
-function isStandaloneMode() {
-  return window.matchMedia('(display-mode: standalone)').matches || !!window.navigator.standalone;
-}
-
-function showStandaloneLoginPrompt() {
-  // In standalone PWA, if no prior session, show a prominent connect prompt
-  // instead of a blank screen — the user needs to tap once to start OAuth
-  let el = document.getElementById('standalone-prompt');
-  if (el) return;
-  el = document.createElement('div');
-  el.id = 'standalone-prompt';
-  el.className = 'standalone-prompt';
-  el.innerHTML = `
-    <div class="standalone-prompt-inner">
-      <div style="font-size:40px;margin-bottom:12px">📊</div>
-      <div style="font-weight:700;font-size:17px;margin-bottom:6px">Finanzas</div>
-      <div style="color:var(--muted);font-size:14px;margin-bottom:20px;text-align:center">Conecta tu cuenta Google<br>para sincronizar tus datos</div>
-      <button class="standalone-connect-btn" onclick="document.getElementById('standalone-prompt').remove();reconnectGoogle()">
-        Conectar con Google
-      </button>
-    </div>`;
-  document.getElementById('app-content').appendChild(el);
-}
-
-async function handleTokenResponse(resp) {
-  if (resp.error) {
-    // Keep wasConnected flag — next load should still attempt silent auth.
-    // Only show the banner so the user can manually reconnect if needed.
-    showReconnectBanner();
-    console.warn('Google auth error:', resp.error);
+async function onGapiReady() {
+  await loadLocal();
+  renderView();
+  // Si vienen parámetros del OAuth callback, usarlos directamente
+  const urlParams = new URLSearchParams(window.location.search);
+  const cbToken  = urlParams.get('at');
+  const cbExpiry = urlParams.get('ei');
+  const cbError  = urlParams.get('auth_error');
+  if (cbToken) {
+    window.history.replaceState({}, '', '/');
+    await applyAccessToken(cbToken, Number(cbExpiry) || 3600);
     return;
   }
-  hideReconnectBanner();
-  state.accessToken = resp.access_token;
+  if (cbError) {
+    window.history.replaceState({}, '', '/');
+    showReconnectCard(`Error de autenticación: ${cbError}`);
+    return;
+  }
+  // Intentar obtener token del servidor
+  if (localStorage.getItem('finanzas_wasConnected')) {
+    await tryServerToken();
+  } else {
+    showReconnectCard();
+  }
+}
+
+async function tryServerToken() {
+  try {
+    const resp = await fetch('/auth/token');
+    if (resp.status === 401) { showReconnectCard(); return; }
+    const data = await resp.json();
+    if (data.error) { showReconnectCard(); return; }
+    await applyAccessToken(data.access_token, data.expires_in || 3600);
+  } catch(e) {
+    showReconnectCard();
+  }
+}
+
+async function applyAccessToken(token, expiresIn) {
+  state.accessToken = token;
+  gapi.client.setToken({ access_token: token });
   localStorage.setItem('finanzas_wasConnected', '1');
-  // Proactively renew the token 5 min before it expires (default 3600s)
+  hideReconnectCard();
+  // Renovar token 5 min antes de que expire
   clearTimeout(state.tokenRefreshTimer);
-  const renewIn = ((resp.expires_in || 3600) - 300) * 1000;
-  state.tokenRefreshTimer = setTimeout(() => {
-    if (state.tokenClient) state.tokenClient.requestAccessToken({ prompt: '' });
-  }, renewIn);
+  state.tokenRefreshTimer = setTimeout(() => tryServerToken(), (expiresIn - 300) * 1000);
+  // Timer global: refresh precios cada 60s sin importar la vista
+  clearInterval(state.globalPriceTimer);
+  state.globalPriceTimer = setInterval(() => {
+    if (state.investments.some(i => i.ticker)) {
+      refreshInvestmentPrices().then(() => {
+        if (state.view === 'investments' || state.view === 'dashboard') renderView();
+      });
+    }
+  }, 60000);
   updateAuthUI(true);
-  updateSyncBadge('Sincronizando…','syncing');
+  updateSyncBadge('Sincronizando…', 'syncing');
   await ensureSpreadsheet();
   await syncFromSheets();
-  updateSyncBadge('Sincronizado ✓','synced');
+  updateSyncBadge('Sincronizado ✓', 'synced');
   renderView();
-  // Fetch live prices first, then write them to Precios tab so the sheet
-  // always gets fresh numbers instead of stale purchasePrice fallbacks
   if (state.investments.some(i => i.ticker)) {
     refreshInvestmentPrices().then(() => {
-      updateSyncBadge('Sincronizado ✓','synced');
+      updateSyncBadge('Sincronizado ✓', 'synced');
       if (state.view === 'investments') renderView();
       syncPreciosTab();
     });
@@ -688,38 +694,40 @@ async function handleTokenResponse(resp) {
   }
 }
 
-function showReconnectBanner() {
-  let b = document.getElementById('reconnect-banner');
-  if (!b) {
-    b = document.createElement('div');
-    b.id = 'reconnect-banner';
-    b.className = 'reconnect-banner';
-    b.innerHTML = '<span>⚠️ Sesión expirada — mostrando datos guardados localmente</span>'
-      + '<button onclick="reconnectGoogle()">Reconectar Google</button>';
-    document.querySelector('.app-header').insertAdjacentElement('afterend', b);
-  }
-  b.style.display = 'flex';
+function showReconnectCard(msg) {
+  let el = document.getElementById('reconnect-card');
+  if (el) { if (msg) el.querySelector('.reconnect-msg').textContent = msg; return; }
+  el = document.createElement('div');
+  el.id = 'reconnect-card';
+  el.className = 'standalone-prompt';
+  el.innerHTML = `
+    <div class="standalone-prompt-inner">
+      <div style="font-size:40px;margin-bottom:12px">📊</div>
+      <div style="font-weight:700;font-size:17px;margin-bottom:6px">Finanzas</div>
+      <div class="reconnect-msg" style="color:var(--muted);font-size:14px;margin-bottom:20px;text-align:center">${msg || 'Conecta tu cuenta Google<br>para sincronizar tus datos'}</div>
+      <button class="standalone-connect-btn" onclick="reconnectGoogle()">Conectar con Google</button>
+    </div>`;
+  document.getElementById('app-content').prepend(el);
 }
 
-function hideReconnectBanner() {
-  const b = document.getElementById('reconnect-banner');
-  if (b) b.style.display = 'none';
+function hideReconnectCard() {
+  const el = document.getElementById('reconnect-card');
+  if (el) el.remove();
 }
+
 function reconnectGoogle() {
-  if (!state.tokenClient) { alert('Google aún no cargó, espera un segundo.'); return; }
-  // Always show the account picker when the user explicitly taps connect/reconnect.
-  // prompt:'' (silent) only works when Google already has an active session cookie —
-  // it fails in standalone PWA mode and after session expiry, leaving the user stuck.
-  state.tokenClient.requestAccessToken({ prompt: 'select_account' });
+  window.location.href = '/auth/login';
 }
 
 function toggleAuth() {
   if (state.accessToken) {
-    google.accounts.oauth2.revoke(state.accessToken, ()=>{});
+    fetch('/auth/revoke', { method: 'POST' }).catch(() => {});
     clearTimeout(state.tokenRefreshTimer);
+    clearInterval(state.globalPriceTimer);
+    clearInterval(state.priceRefreshTimer);
     state.accessToken = null; state.user = null;
     localStorage.removeItem('finanzas_wasConnected');
-    hideReconnectBanner();
+    hideReconnectCard();
     updateAuthUI(false); updateSyncBadge('Local'); renderView();
   } else {
     reconnectGoogle();
@@ -978,7 +986,7 @@ async function loadSnapshots() {
   try {
     await ensureSnapshotsSheet();
     const resp = await gapi.client.sheets.spreadsheets.values.get({
-      spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2:F'
+      spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2:F', valueRenderOption: 'UNFORMATTED_VALUE'
     });
     const rows = resp.result.values || [];
     if (rows.length === 0) return;
@@ -1004,7 +1012,8 @@ async function syncFromSheets() {
   try {
     const resp = await gapi.client.sheets.spreadsheets.values.batchGet({
       spreadsheetId: state.spreadsheetId,
-      ranges:['Transacciones!A2:G','Ahorro!A2:F','Inversiones!A2:I']
+      ranges:['Transacciones!A2:G','Ahorro!A2:F','Inversiones!A2:I'],
+      valueRenderOption: 'UNFORMATTED_VALUE'
     });
     const vrs = resp.result.valueRanges;
     state.transactions = (vrs[0].values||[]).map(r=>({ id:r[0]||uid(), date:r[1]||'', type:r[2]||'Gasto', category:r[3]||'Otros', description:r[4]||'', amount:Number(r[5])||0, paymentMethod:r[6]||'' })).filter(t=>t.date);
@@ -1038,8 +1047,9 @@ async function syncFromSheets() {
     }).filter(i=>i.name);
     try {
       const purResp = await gapi.client.sheets.spreadsheets.values.get({
-        spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F'
+        spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F', valueRenderOption:'UNFORMATTED_VALUE'
       });
+      const repairedIds = new Set();
       state.investmentPurchases = (purResp.result.values||[]).map(r => {
         const p = { id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'',
           shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountUSD:Number(r[5])||0 };
@@ -1049,12 +1059,13 @@ async function syncFromSheets() {
           if (parent && parent.purchasePrice > 0) {
             p.priceUSD = parent.purchasePrice;
             p.shares   = Math.round(p.amountUSD / p.priceUSD * 1e8) / 1e8;
+            repairedIds.add(p.id);
           }
         }
         return p;
       }).filter(p=>p.investmentId);
-      // Write repairs back to Compras_Inv so they persist
-      const repairedPurchases = state.investmentPurchases.filter(p=>p.priceUSD>0 && p.shares>0);
+      // Write only actually-repaired purchases back to Compras_Inv so they persist
+      const repairedPurchases = state.investmentPurchases.filter(p => repairedIds.has(p.id));
       for (const p of repairedPurchases) {
         try { await updateRowById('Compras_Inv', p.id, [p.id,p.investmentId,p.date,p.shares,p.priceUSD,p.amountUSD]); } catch(e) {}
       }
@@ -1073,7 +1084,7 @@ async function syncFromSheets() {
     } catch(e) { await ensureComprasInvSheet(); }
     try {
       const subResp = await gapi.client.sheets.spreadsheets.values.get({
-        spreadsheetId:state.spreadsheetId, range:'Suscripciones!A2:H'
+        spreadsheetId:state.spreadsheetId, range:'Suscripciones!A2:H', valueRenderOption:'UNFORMATTED_VALUE'
       });
       state.subscriptions = (subResp.result.values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', amount:Number(r[2])||0, currency:r[3]||'COP', frequency:r[4]||'monthly', nextPaymentDate:r[5]||'', category:r[6]||'Servicios', notes:r[7]||'' })).filter(s=>s.name);
     } catch(e) { await ensureSuscripcionesSheet(); }
@@ -1193,8 +1204,12 @@ async function deleteSubscription(id) {
   if (!state.accessToken) return;
   try { await deleteRowById('Suscripciones',id); } catch(e) {}
 }
-async function markSubscriptionPaid(id) {
+async function markSubscriptionPaid(id, createTx = true) {
   const sub = state.subscriptions.find(s=>s.id===id); if (!sub) return;
+  if (createTx) {
+    await addTransaction({ date: todayISO(), type: 'Gasto', category: sub.category||'Servicios',
+      description: sub.name, amount: sub.amount, paymentMethod: '' });
+  }
   sub.nextPaymentDate = calcNextPaymentDate(sub.frequency, todayISO());
   saveLocal(); renderView();
   if (!state.accessToken) return;
@@ -1379,7 +1394,7 @@ async function openAlertModal(invId) {
             </div>`).join('')}
         </div>` : ''}
 
-      ${Notification.permission === 'denied' ? `
+      ${typeof Notification !== 'undefined' && Notification.permission === 'denied' ? `
         <p style="color:var(--red);font-size:12px;margin-top:12px">⚠️ Notificaciones bloqueadas en este navegador. Actívalas en Ajustes del sitio.</p>` : ''}
     </div>`);
 }
@@ -1480,7 +1495,7 @@ async function submitTransaction(e, editId) {
         tx.description.toLowerCase().includes(s.name.toLowerCase()) ||
         s.name.toLowerCase().includes(tx.description.toLowerCase())
       );
-      if (matched) await markSubscriptionPaid(matched.id);
+      if (matched) await markSubscriptionPaid(matched.id, false);
     }
   }
 }
@@ -1644,7 +1659,7 @@ function subscriptionCard(sub) {
           </div>
         </div>
         <div class="sub-actions-row">
-          <button class="action-btn" onclick='openSubscriptionModal(${JSON.stringify(sub)})'>✏️</button>
+          <button class="action-btn" onclick="editSubscription('${sub.id}')">✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('sub','${sub.id}')">🗑️</button>
         </div>
       </div>
@@ -1995,6 +2010,12 @@ async function doDelete(entity, id) {
   if (entity==='sub')     await deleteSubscription(id);
 }
 
+/* ── ID-based edit wrappers (avoid JSON.stringify in onclick) ── */
+function editTransaction(id)  { openTransactionModal(state.transactions.find(t => t.id === id)); }
+function editSavings(id)      { openEditSavingsModal(state.savings.find(s => s.id === id)); }
+function editSubscription(id) { openSubscriptionModal(state.subscriptions.find(s => s.id === id)); }
+function editInvestment(id)   { openEditInvestmentModal(state.investments.find(i => i.id === id)); }
+
 /* ════════════════════════════════════════════════════════════
    VIEW: DASHBOARD
    ════════════════════════════════════════════════════════════ */
@@ -2204,7 +2225,7 @@ function txCard(t, showActions=false) {
       <div class="tx-right">
         <div class="tx-amount ${isExp?'expense':'income'}">${isExp?'-':'+'}${formatCOP(t.amount)}</div>
         ${showActions?`<div class="tx-actions">
-          <button class="action-btn" onclick='openTransactionModal(${JSON.stringify(t)})'>✏️</button>
+          <button class="action-btn" onclick="editTransaction('${t.id}')">✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('tx','${t.id}')">🗑️</button>
         </div>`:''}
       </div>
@@ -2254,7 +2275,7 @@ function renderSavings() {
           <span class="section-title">Mis suscripciones</span>
           <button class="section-link" onclick="openSubscriptionModal()">+ Nueva</button>
         </div>
-        ${Notification.permission !== 'granted' ? `
+        ${(typeof Notification === 'undefined' || Notification.permission !== 'granted') ? `
         <div class="notif-banner">
           <span>🔔 Activa recordatorios para recibir alertas un día antes de cada cobro.</span>
           <button class="btn-small" onclick="enableNotifications()">Activar</button>
@@ -2279,7 +2300,7 @@ function savingsCard(s) {
           ${s.deadline?`<div class="savings-deadline">${daysLeft!==null&&daysLeft>=0?daysLeft+' días restantes':'Vencida'} · ${dateStr(s.deadline)}</div>`:''}
         </div>
         <div style="display:flex;gap:4px">
-          <button class="action-btn" onclick='openEditSavingsModal(${JSON.stringify(s)})'>✏️</button>
+          <button class="action-btn" onclick="editSavings('${s.id}')">✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('savings','${s.id}')">🗑️</button>
         </div>
       </div>
@@ -2432,7 +2453,7 @@ function investmentCard(inv) {
         </div>
         <div style="display:flex;gap:4px">
           ${inv.ticker ? `<button class="action-btn alert-btn ${state.alerts.some(a=>a.invId===inv.id&&a.active&&!a.triggered)?'has-alert':''}" onclick="openAlertModal('${inv.id}')" title="Alertas de precio">🔔</button>` : ''}
-          <button class="action-btn" onclick='openEditInvestmentModal(${JSON.stringify({id:inv.id,name:inv.name,ticker:inv.ticker,type:inv.type,notes:inv.notes})})'>✏️</button>
+          <button class="action-btn" onclick="editInvestment('${inv.id}')">✏️</button>
           <button class="action-btn danger" onclick="confirmDelete('inv','${inv.id}')">🗑️</button>
         </div>
       </div>
@@ -2555,13 +2576,6 @@ function renderProjection() {
 /* ════════════════════════════════════════════════════════════
    WEB NOTIFICATIONS — recordatorios de suscripciones
    ════════════════════════════════════════════════════════════ */
-async function requestNotifPermission() {
-  if (!('Notification' in window)) return false;
-  if (Notification.permission === 'granted') return true;
-  if (Notification.permission === 'denied') return false;
-  const result = await Notification.requestPermission();
-  return result === 'granted';
-}
 
 function checkSubscriptionNotifications() {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -2588,15 +2602,12 @@ function checkSubscriptionNotifications() {
       body  = `${sub.name} se cobra mañana por ${amtStr}`;
     }
 
-    try {
-      new Notification(title, { body, icon: '/icon-192.png', tag: notifKey, renotify: false });
-      localStorage.setItem(notifKey, '1');
-    } catch(e) {}
+    showNotif(title, body, notifKey).then(() => localStorage.setItem(notifKey, '1')).catch(()=>{});
   });
 }
 
 async function enableNotifications() {
-  const granted = await requestNotifPermission();
+  const granted = await requestNotificationPermission();
   if (granted) {
     checkSubscriptionNotifications();
     renderView();
@@ -2622,10 +2633,11 @@ async function enableNotifications() {
 
 /* ── Boot ────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {
-  loadLocal();
-  renderView();
-  // Chequear notificaciones si ya tienen permiso
-  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-    checkSubscriptionNotifications();
-  }
+  // Render cached data immediately while GAPI loads
+  loadLocal().then(() => {
+    renderView();
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      checkSubscriptionNotifications();
+    }
+  });
 });
