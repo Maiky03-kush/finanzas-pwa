@@ -644,6 +644,17 @@ details > summary::-webkit-details-marker { display: none; }
 .table-bar-fill.expense-bar { background: var(--red); }
 
 /* ─── TRANSACTIONS: type tab toggle ─── */
+.tx-date-chips {
+  display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap;
+}
+.tx-date-chip {
+  padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--muted); cursor: pointer; transition: all 0.15s; white-space: nowrap;
+}
+.tx-date-chip.active  { background: var(--text); color: var(--bg); border-color: var(--text); }
+.tx-date-chip:hover:not(.active) { border-color: var(--muted); color: var(--text); }
+
 .tx-type-tabs {
   display: flex; gap: 0; margin-bottom: 14px;
   background: var(--card); border-radius: 16px;

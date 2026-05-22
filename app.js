@@ -21,6 +21,7 @@ let state = {
   addType: 'Gasto', addPaymentMethod: 'Efectivo',
   txFilter: 'Gasto', txSearch: '',
   savingsSubTab: 'goals',
+  txDateRange: 'all',
   snapshotRange: 12,
   usdCopRate: 4200,
   priceRefreshTimer: null,
@@ -2320,7 +2321,8 @@ function renderDashboard() {
 /* ════════════════════════════════════════════════════════════
    VIEW: TRANSACTIONS (toggle Gastos / Ingresos)
    ════════════════════════════════════════════════════════════ */
-function setTxFilter(type) { state.txFilter = type; renderTransactions(); }
+function setTxFilter(type)     { state.txFilter = type;         renderTransactions(); }
+function setTxDateRange(range) { state.txDateRange = range;      renderTransactions(); }
 function setTxSearch(val) {
   state.txSearch = val;
   renderTransactions();
@@ -2328,13 +2330,41 @@ function setTxSearch(val) {
   if (inp) { inp.value = val; inp.focus(); inp.setSelectionRange(val.length, val.length); }
 }
 
+function txInDateRange(tx) {
+  if (state.txDateRange === 'all') return true;
+  const d   = new Date(tx.date + 'T00:00:00');
+  const now = new Date();
+  if (state.txDateRange === 'month') {
+    return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+  }
+  const cutoff = new Date();
+  if (state.txDateRange === '3m')   { cutoff.setMonth(cutoff.getMonth() - 3);           return d >= cutoff; }
+  if (state.txDateRange === '6m')   { cutoff.setMonth(cutoff.getMonth() - 6);           return d >= cutoff; }
+  if (state.txDateRange === 'year') { cutoff.setFullYear(cutoff.getFullYear(), 0, 1);   return d >= cutoff; }
+  return true;
+}
+
 function renderTransactions() {
-  const filter   = state.txFilter;
-  const allGasto  = state.transactions.filter(t=>t.type==='Gasto');
-  const allIngreso= state.transactions.filter(t=>t.type==='Ingreso');
-  const totalGasto  = allGasto.reduce((a,t)=>a+Number(t.amount),0);
-  const totalIngreso= allIngreso.reduce((a,t)=>a+Number(t.amount),0);
-  const filtered = (filter==='Gasto' ? allGasto : allIngreso).filter(t =>
+  const filter = state.txFilter;
+  const dr     = state.txDateRange;
+
+  const dateRanges = [
+    { key: 'month', label: 'Este mes' },
+    { key: '3m',    label: '3 meses'  },
+    { key: '6m',    label: '6 meses'  },
+    { key: 'year',  label: 'Este año' },
+    { key: 'all',   label: 'Todo'     },
+  ];
+
+  // Apply date range first, then search
+  const inRange   = state.transactions.filter(txInDateRange);
+  const allGasto  = inRange.filter(t => t.type === 'Gasto');
+  const allIngreso= inRange.filter(t => t.type === 'Ingreso');
+  const totalGasto  = allGasto.reduce((a,t)  => a + Number(t.amount), 0);
+  const totalIngreso= allIngreso.reduce((a,t) => a + Number(t.amount), 0);
+
+  const base     = filter === 'Gasto' ? allGasto : allIngreso;
+  const filtered = base.filter(t =>
     !state.txSearch ||
     t.description.toLowerCase().includes(state.txSearch.toLowerCase()) ||
     t.category.toLowerCase().includes(state.txSearch.toLowerCase())
@@ -2342,22 +2372,36 @@ function renderTransactions() {
 
   // Group by month
   const groups = {};
-  [...filtered].sort((a,b)=>b.date.localeCompare(a.date)).forEach(t => {
-    const d   = new Date(t.date+'T00:00:00');
+  [...filtered].sort((a,b) => b.date.localeCompare(a.date)).forEach(t => {
+    const d   = new Date(t.date + 'T00:00:00');
     const key = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-    const lbl = d.toLocaleDateString('es-CO',{month:'long',year:'numeric'});
-    if (!groups[key]) groups[key] = { label:lbl, txs:[], total:0 };
+    const lbl = d.toLocaleDateString('es-CO', { month: 'long', year: 'numeric' });
+    if (!groups[key]) groups[key] = { label: lbl, txs: [], total: 0 };
     groups[key].txs.push(t);
     groups[key].total += Number(t.amount);
   });
+
+  const filteredCount = filtered.length;
+  const totalCount    = base.length;
+  const isFiltered    = state.txSearch || dr !== 'all';
 
   document.getElementById('app-content').innerHTML = `
     <div class="content-inner">
       <!-- Búsqueda -->
       <div class="tx-search-wrap">
-        <input id="tx-search-input" class="tx-search-input" type="text" placeholder="🔍 Buscar por descripción o categoría…" value="${state.txSearch}" oninput="setTxSearch(this.value)">
+        <input id="tx-search-input" class="tx-search-input" type="text"
+          placeholder="🔍 Buscar por descripción o categoría…"
+          value="${state.txSearch}" oninput="setTxSearch(this.value)">
         ${state.txSearch ? `<button class="tx-search-clear" onclick="setTxSearch('')">✕</button>` : ''}
       </div>
+
+      <!-- Filtro de rango de fechas -->
+      <div class="tx-date-chips">
+        ${dateRanges.map(r => `
+          <button class="tx-date-chip${dr === r.key ? ' active' : ''}"
+            onclick="setTxDateRange('${r.key}')">${r.label}</button>`).join('')}
+      </div>
+
       <!-- Toggle Gastos / Ingresos -->
       <div class="tx-type-tabs">
         <button class="tx-tab ${filter==='Gasto'?'active-tab expense-tab':''}" onclick="setTxFilter('Gasto')">
@@ -2372,20 +2416,20 @@ function renderTransactions() {
 
       <!-- Summary bar -->
       <div class="tx-summary-bar">
-        <span>${filter==='Gasto'?'Total gastos':'Total ingresos'} registrados</span>
+        <span>${isFiltered ? `${filteredCount} de ${totalCount}` : `${totalCount}`} ${filter==='Gasto'?'gastos':'ingresos'}</span>
         <strong class="${filter==='Gasto'?'expense':'income'}">${formatCOP(filter==='Gasto'?totalGasto:totalIngreso)}</strong>
       </div>
 
       <!-- Grouped list -->
       ${Object.keys(groups).length === 0
-        ? `<p class="empty-state">Sin ${filter==='Gasto'?'gastos':'ingresos'} registrados.<br>Toca + para agregar.</p>`
+        ? `<p class="empty-state">Sin ${filter==='Gasto'?'gastos':'ingresos'} en este período.<br>${dr!=='all'?`<button class="section-link" style="margin-top:8px" onclick="setTxDateRange('all')">Ver todo el historial</button>`:'Toca + para agregar.'}</p>`
         : Object.entries(groups).map(([key, grp]) => `
             <div class="month-group">
               <div class="month-header">
-                <span>${grp.label.charAt(0).toUpperCase()+grp.label.slice(1)}</span>
+                <span>${grp.label.charAt(0).toUpperCase() + grp.label.slice(1)}</span>
                 <span class="month-total ${filter==='Gasto'?'expense':'income'}">${formatCOP(grp.total)}</span>
               </div>
-              <div class="tx-list">${grp.txs.map(t=>txCard(t,true)).join('')}</div>
+              <div class="tx-list">${grp.txs.map(t => txCard(t, true)).join('')}</div>
             </div>`).join('')}
     </div>`;
 }
