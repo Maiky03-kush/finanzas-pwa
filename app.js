@@ -13,7 +13,7 @@ const CONFIG = {
 let state = {
   user: null, accessToken: null, spreadsheetId: null,
   transactions: [], savings: [], investments: [], investmentPurchases: [],
-  subscriptions: [], alerts: [], snapshots: [],
+  subscriptions: [], alerts: [], snapshots: [], budgets: [],
   view: 'dashboard', syncing: false,
   tokenRefreshTimer: null,
   gapiReady: false,
@@ -84,6 +84,7 @@ function saveLocal() {
   localStorage.setItem('finanzas_categories',    JSON.stringify(state.categories));
   localStorage.setItem('finanzas_alerts',        JSON.stringify(state.alerts));
   localStorage.setItem('finanzas_snapshots',     JSON.stringify(state.snapshots));
+  localStorage.setItem('finanzas_budgets',       JSON.stringify(state.budgets));
   // Mirror critical data to IndexedDB so standalone PWA shares the same cache
   idbSet('investments',  invToSave);
   idbSet('transactions', state.transactions);
@@ -94,28 +95,30 @@ function saveLocal() {
   idbSet('snapshots',     state.snapshots);
   idbSet('subscriptions', state.subscriptions);
   idbSet('categories',    state.categories);
+  idbSet('budgets',       state.budgets);
 }
 
 async function loadLocal() {
   try {
-    const [idbInv, idbTx, idbSav, idbPur, idbSheetId, idbAlerts, idbSnaps, idbSubs, idbCats] = await Promise.all([
+    const [idbInv, idbTx, idbSav, idbPur, idbSheetId, idbAlerts, idbSnaps, idbSubs, idbCats, idbBudgets] = await Promise.all([
       idbGet('investments'), idbGet('transactions'), idbGet('savings'),
       idbGet('purchases'),   idbGet('sheetId'),
       idbGet('alerts'),      idbGet('snapshots'),
-      idbGet('subscriptions'), idbGet('categories')
+      idbGet('subscriptions'), idbGet('categories'), idbGet('budgets')
     ]);
-    state.transactions        = idbTx     || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
-    state.savings             = idbSav    || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
-    state.investments         = idbInv    || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
-    state.investmentPurchases = idbPur    || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
-    state.subscriptions       = idbSubs   || JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
-    state.alerts              = idbAlerts || JSON.parse(localStorage.getItem('finanzas_alerts')        || '[]');
-    state.snapshots           = idbSnaps  || JSON.parse(localStorage.getItem('finanzas_snapshots')     || '[]');
+    state.transactions        = idbTx      || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
+    state.savings             = idbSav     || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
+    state.investments         = idbInv     || JSON.parse(localStorage.getItem('finanzas_investments')    || '[]');
+    state.investmentPurchases = idbPur     || JSON.parse(localStorage.getItem('finanzas_inv_purchases') || '[]');
+    state.subscriptions       = idbSubs    || JSON.parse(localStorage.getItem('finanzas_subscriptions') || '[]');
+    state.alerts              = idbAlerts  || JSON.parse(localStorage.getItem('finanzas_alerts')        || '[]');
+    state.snapshots           = idbSnaps   || JSON.parse(localStorage.getItem('finanzas_snapshots')     || '[]');
+    state.budgets             = idbBudgets || JSON.parse(localStorage.getItem('finanzas_budgets')       || '[]');
     state.spreadsheetId       = idbSheetId || localStorage.getItem('finanzas_sheetId') || null;
     const savedCats = idbCats || JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
     if (savedCats) state.categories = savedCats;
   } catch(e) {
-    state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = [];
+    state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = []; state.budgets = [];
   }
 }
 
@@ -1117,6 +1120,76 @@ async function ensureSnapshotsSheet() {
   } catch(e) { console.warn('ensureSnapshotsSheet:', e); }
 }
 
+async function ensurePresupuestoSheet() {
+  if (!state.spreadsheetId) return;
+  try {
+    const meta = await gapi.client.sheets.spreadsheets.get({ spreadsheetId: state.spreadsheetId });
+    const exists = meta.result.sheets.some(s => s.properties.title === 'Presupuesto');
+    if (!exists) {
+      await gapi.client.sheets.spreadsheets.batchUpdate({
+        spreadsheetId: state.spreadsheetId,
+        resource: { requests: [{ addSheet: { properties: { title: 'Presupuesto' } } }] }
+      });
+    }
+    await gapi.client.sheets.spreadsheets.values.update({
+      spreadsheetId: state.spreadsheetId, range: 'Presupuesto!A1:C1',
+      valueInputOption: 'RAW',
+      resource: { values: [['ID', 'Categoría', 'LímiteMensual']] }
+    });
+  } catch(e) { console.warn('ensurePresupuestoSheet:', e); }
+}
+
+async function loadBudgets() {
+  try {
+    const resp = await gapi.client.sheets.spreadsheets.values.get({
+      spreadsheetId: state.spreadsheetId, range: 'Presupuesto!A2:C', valueRenderOption: 'UNFORMATTED_VALUE'
+    });
+    state.budgets = (resp.result.values || [])
+      .map(r => ({ id: r[0] || uid(), category: r[1] || '', monthlyLimit: Number(r[2]) || 0 }))
+      .filter(b => b.category && b.monthlyLimit > 0);
+    saveLocal();
+  } catch(e) { await ensurePresupuestoSheet(); }
+}
+
+async function saveBudget(budget) {
+  const existing = state.budgets.find(b => b.category === budget.category);
+  if (existing) {
+    existing.monthlyLimit = budget.monthlyLimit;
+    saveLocal();
+    try { await updateRowById('Presupuesto', existing.id, [existing.id, existing.category, existing.monthlyLimit]); } catch(e) {}
+  } else {
+    budget.id = uid();
+    state.budgets.push(budget);
+    saveLocal();
+    try { await appendRow('Presupuesto', [budget.id, budget.category, budget.monthlyLimit]); } catch(e) {}
+  }
+  renderView();
+}
+
+async function deleteBudget(id) {
+  state.budgets = state.budgets.filter(b => b.id !== id);
+  saveLocal();
+  try { await deleteRowById('Presupuesto', id); } catch(e) {}
+  renderView();
+}
+
+function getBudgetProgress() {
+  const now   = new Date();
+  const year  = now.getFullYear(), month = now.getMonth();
+  const txThisMonth = state.transactions.filter(t => {
+    if (t.type !== 'Gasto') return false;
+    const d = new Date(t.date + 'T00:00:00');
+    return d.getFullYear() === year && d.getMonth() === month;
+  });
+  return state.budgets.map(b => {
+    const spent = txThisMonth
+      .filter(t => t.category === b.category)
+      .reduce((a, t) => a + Number(t.amount), 0);
+    const pct = b.monthlyLimit > 0 ? (spent / b.monthlyLimit) * 100 : 0;
+    return { ...b, spent, pct };
+  }).sort((a, b) => b.pct - a.pct);
+}
+
 async function saveMonthlySnapshot() {
   if (!state.spreadsheetId || !state.accessToken) return;
   const monthKey = new Date().toISOString().slice(0, 7); // YYYY-MM
@@ -1267,9 +1340,10 @@ async function syncFromSheets() {
       state.subscriptions = (subResp.result.values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', amount:Number(r[2])||0, currency:r[3]||'COP', frequency:r[4]||'monthly', nextPaymentDate:r[5]||'', category:r[6]||'Servicios', notes:r[7]||'' })).filter(s=>s.name);
     } catch(e) { await ensureSuscripcionesSheet(); }
     saveLocal();
-    // Load snapshots from Sheet and save this month's if not yet saved
+    // Load snapshots and budgets from Sheet
     await loadSnapshots();
     await saveMonthlySnapshot();
+    await loadBudgets();
   } catch(e) { console.error('syncFromSheets', e); }
 }
 
@@ -2195,6 +2269,149 @@ function editSubscription(id) { openSubscriptionModal(state.subscriptions.find(s
 function editInvestment(id)   { openEditInvestmentModal(state.investments.find(i => i.id === id)); }
 
 /* ════════════════════════════════════════════════════════════
+   BUDGET PANEL + MODAL
+   ════════════════════════════════════════════════════════════ */
+function budgetBarColor(pct) {
+  if (pct >= 100) return 'var(--red)';
+  if (pct >= 80)  return '#FF9F0A';
+  return 'var(--green)';
+}
+
+function renderBudgetPanel() {
+  const progress = getBudgetProgress();
+  const now = new Date();
+  const monthLabel = now.toLocaleDateString('es-CO', { month: 'long' });
+
+  if (!progress.length) {
+    return `
+      <div class="section-header">
+        <span class="section-title">Presupuesto — ${monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1)}</span>
+        <button class="section-link" onclick="openBudgetModal()">+ Agregar</button>
+      </div>
+      <div class="card" style="text-align:center;padding:24px 20px">
+        <div style="font-size:28px;margin-bottom:8px">🎯</div>
+        <div style="font-weight:600;margin-bottom:4px">Sin presupuestos</div>
+        <div style="color:var(--muted);font-size:13px;margin-bottom:14px">Define un límite mensual por categoría para controlar tus gastos.</div>
+        <button class="btn-primary" style="font-size:13px;padding:8px 20px" onclick="openBudgetModal()">Crear presupuesto</button>
+      </div>`;
+  }
+
+  const totalBudget = progress.reduce((a, b) => a + b.monthlyLimit, 0);
+  const totalSpent  = progress.reduce((a, b) => a + b.spent, 0);
+  const overCount   = progress.filter(b => b.pct >= 100).length;
+
+  return `
+    <div class="section-header">
+      <span class="section-title">Presupuesto — ${monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1)}</span>
+      <button class="section-link" onclick="openBudgetModal()">Gestionar</button>
+    </div>
+    <div class="card" style="padding:16px 20px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px">
+        <div>
+          <span style="font-size:20px;font-weight:700">${formatCOP(totalSpent)}</span>
+          <span style="color:var(--muted);font-size:13px"> / ${formatCOP(totalBudget)}</span>
+        </div>
+        ${overCount > 0
+          ? `<span style="font-size:12px;font-weight:600;color:var(--red)">⚠️ ${overCount} excedido${overCount > 1 ? 's' : ''}</span>`
+          : `<span style="font-size:12px;font-weight:600;color:var(--green)">✓ En control</span>`}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        ${progress.map(b => {
+          const col   = budgetBarColor(b.pct);
+          const width = Math.min(b.pct, 100).toFixed(1);
+          const over  = b.pct > 100;
+          return `
+            <div>
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:13px">${catIcon(b.category)} ${b.category}</span>
+                <span style="font-size:12px;font-weight:600;color:${col}">
+                  ${formatCOP(b.spent)} / ${formatCOP(b.monthlyLimit)}
+                  ${over ? `<span style="margin-left:4px">+${formatCOP(b.spent - b.monthlyLimit)}</span>` : ''}
+                </span>
+              </div>
+              <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden">
+                <div style="height:100%;width:${width}%;background:${col};border-radius:4px;transition:width 0.4s"></div>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+function openBudgetModal() {
+  const cats    = state.categories.Gasto;
+  const budgets = state.budgets;
+
+  openModal(`
+    <div class="modal-header">
+      <h3>🎯 Presupuesto mensual</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      ${budgets.length ? `
+        <div style="margin-bottom:16px">
+          ${budgets.map(b => `
+            <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)">
+              <span style="flex:1;font-size:14px">${catIcon(b.category)} ${b.category}</span>
+              <span style="font-weight:600;font-size:14px">${formatCOP(b.monthlyLimit)}</span>
+              <button onclick="openEditBudget('${b.id}')" style="background:none;border:none;cursor:pointer;font-size:16px;padding:4px">✏️</button>
+              <button onclick="deleteBudget('${b.id}').then(()=>openBudgetModal())" style="background:none;border:none;cursor:pointer;font-size:16px;padding:4px">🗑️</button>
+            </div>`).join('')}
+        </div>` : ''}
+      <div style="font-size:12px;font-weight:600;color:var(--muted);margin-bottom:10px">
+        ${budgets.length ? 'AGREGAR OTRO' : 'NUEVA CATEGORÍA'}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <select id="budget-cat" class="form-input">
+          ${cats.filter(c => !budgets.find(b => b.category === c)).map(c =>
+            `<option value="${c}">${catIcon(c)} ${c}</option>`).join('')}
+        </select>
+        <input id="budget-amount" class="form-input" type="number" min="0" placeholder="Límite mensual (COP)" style="font-size:16px">
+        <button class="btn-primary" onclick="submitBudget()">Guardar presupuesto</button>
+      </div>
+    </div>`);
+}
+
+function openEditBudget(id) {
+  const b = state.budgets.find(x => x.id === id);
+  if (!b) return;
+  openModal(`
+    <div class="modal-header">
+      <h3>✏️ Editar — ${b.category}</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <label style="font-size:13px;color:var(--muted)">Límite mensual</label>
+        <input id="budget-edit-amount" class="form-input" type="number" min="0"
+          value="${b.monthlyLimit}" style="font-size:16px">
+        <button class="btn-primary" onclick="submitEditBudget('${id}')">Guardar</button>
+        <button class="btn-secondary" onclick="openBudgetModal()">Cancelar</button>
+      </div>
+    </div>`);
+}
+
+async function submitBudget() {
+  const cat    = document.getElementById('budget-cat')?.value;
+  const amount = Number(document.getElementById('budget-amount')?.value);
+  if (!cat || !amount || amount <= 0) return;
+  closeModal();
+  await saveBudget({ category: cat, monthlyLimit: amount });
+}
+
+async function submitEditBudget(id) {
+  const amount = Number(document.getElementById('budget-edit-amount')?.value);
+  if (!amount || amount <= 0) return;
+  const b = state.budgets.find(x => x.id === id);
+  if (!b) return;
+  b.monthlyLimit = amount;
+  saveLocal();
+  closeModal();
+  try { await updateRowById('Presupuesto', id, [id, b.category, b.monthlyLimit]); } catch(e) {}
+  renderView();
+}
+
+/* ════════════════════════════════════════════════════════════
    VIEW: DASHBOARD
    ════════════════════════════════════════════════════════════ */
 function renderDashboard() {
@@ -2258,6 +2475,9 @@ function renderDashboard() {
             </tbody>
           </table>
         </div>` : ''}
+
+      <!-- Presupuesto mensual -->
+      ${renderBudgetPanel()}
 
       <!-- Metas de ahorro -->
       ${state.savings.length ? `
