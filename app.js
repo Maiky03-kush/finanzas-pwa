@@ -24,6 +24,7 @@ let state = {
   txFilter: 'Gasto', txSearch: '',
   savingsSubTab: 'goals',
   txDateRange: 'all',
+  invCurrency: 'USD',
   snapshotRange: 12,
   usdCopRate: 4200,
   priceRefreshTimer: null,
@@ -221,6 +222,12 @@ function buildDonutSVG(segments) {
   });
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="flex-shrink:0">${arcs.join('')}</svg>`;
 }
+
+function fmtInv(usdVal) {
+  if (state.invCurrency === 'COP') return formatCOP(usdVal * (state.usdCopRate || 4200));
+  return formatUSD(usdVal);
+}
+function setInvCurrency(cur) { state.invCurrency = cur; renderView(); }
 
 function fmtYAxis(v) {
   const abs = Math.abs(v);
@@ -2876,19 +2883,26 @@ function renderInvestments() {
   const pnlUSD = totalCurUSD - totalInvUSD;
   const pctUSD = totalInvUSD>0 ? (pnlUSD/totalInvUSD*100) : 0;
 
+  const isCOP = state.invCurrency === 'COP';
+  const rate  = state.usdCopRate || 4200;
+
   document.getElementById('app-content').innerHTML = `
     <div class="content-inner">
       <div class="balance-card ${pnlUSD<0?'negative':''}">
         <div class="balance-label">Portafolio total</div>
-        <div class="balance-amount">${formatUSD(totalCurUSD)}</div>
-        <div class="balance-cop-equiv">≈ ${formatCOP(totalCurUSD * state.usdCopRate)}</div>
-        <div class="balance-sub">Invertido: ${formatUSD(totalInvUSD)} · P&L: ${pnlUSD>=0?'+':''}${formatUSD(pnlUSD)} (${pctUSD>=0?'+':''}${pctUSD.toFixed(2)}%)</div>
+        <div class="balance-amount">${fmtInv(totalCurUSD)}</div>
+        <div class="balance-cop-equiv">${isCOP ? `≈ ${formatUSD(totalCurUSD)}` : `≈ ${formatCOP(totalCurUSD * rate)}`}</div>
+        <div class="balance-sub">Invertido: ${fmtInv(totalInvUSD)} · P&L: ${pnlUSD>=0?'+':''}${fmtInv(pnlUSD)} (${pctUSD>=0?'+':''}${pctUSD.toFixed(2)}%)</div>
       </div>
 
       <!-- Market info bar -->
       <div class="market-info-bar">
-        <span>USD/COP: <strong>${Math.round(state.usdCopRate).toLocaleString('es-CO')}</strong></span>
+        <span>USD/COP: <strong>${Math.round(rate).toLocaleString('es-CO')}</strong></span>
         ${lastUpd?`<span>Precios: <strong>${lastUpd}</strong></span>`:'<span style="color:var(--muted)">Cargando precios…</span>'}
+        <div class="inv-currency-toggle">
+          <button class="inv-cur-btn${!isCOP?' active':''}" onclick="setInvCurrency('USD')">USD</button>
+          <button class="inv-cur-btn${isCOP?' active':''}" onclick="setInvCurrency('COP')">COP</button>
+        </div>
         <button class="refresh-btn" onclick="manualRefreshPrices()">↻ Actualizar</button>
       </div>
 
@@ -2928,15 +2942,16 @@ function purchaseHistorySection(inv) {
       <div class="ph-row">
         <span class="ph-date">${dateStr(p.date)}</span>
         <span class="ph-shares">${p.shares} ${unitLabel}</span>
-        <span class="ph-price">${formatUSD(p.priceUSD)}</span>
-        <span class="ph-usd">${formatUSD(p.amountUSD||costUSD)}</span>
-        ${livePrice>0?`<span class="ph-pnl ${lotPnlUSD>=0?'profit':'loss'}">${lotPnlUSD>=0?'+':''}${formatUSD(lotPnlUSD)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
+        <span class="ph-price">${fmtInv(p.priceUSD)}</span>
+        <span class="ph-usd">${fmtInv(p.amountUSD||costUSD)}</span>
+        ${livePrice>0?`<span class="ph-pnl ${lotPnlUSD>=0?'profit':'loss'}">${lotPnlUSD>=0?'+':''}${fmtInv(lotPnlUSD)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
         <button class="ph-del-btn" onclick="openEditPurchaseModal('${p.id}')" title="Editar lote">✏️</button>
         <button class="ph-del-btn" onclick="deleteInvestmentPurchase('${p.id}')" title="Eliminar lote">🗑️</button>
       </div>`;
   }).join('');
 
   const startExpanded = false;
+  const curLabel = state.invCurrency === 'COP' ? 'Total COP' : 'Total USD';
   return `
     <div class="ph-container">
       <div class="ph-header" onclick="togglePurchaseHistory('${inv.id}')">
@@ -2947,11 +2962,11 @@ function purchaseHistorySection(inv) {
         ${purchases.length>0?`
           <div class="ph-summary">
             <span>Total: <strong>${totalShares} ${unitLabel}</strong></span>
-            ${weightedAvg>0?`<span>Precio promedio entrada: <strong>${formatUSD(weightedAvg)}</strong></span>`:''}
-            ${livePrice>0&&weightedAvg>0?`<span class="${livePrice>=weightedAvg?'profit':'loss'}">Precio actual ${formatUSD(livePrice)} · ${((livePrice-weightedAvg)/weightedAvg*100)>=0?'+':''}${((livePrice-weightedAvg)/weightedAvg*100).toFixed(2)}% vs entrada</span>`:''}
+            ${weightedAvg>0?`<span>Precio promedio entrada: <strong>${fmtInv(weightedAvg)}</strong></span>`:''}
+            ${livePrice>0&&weightedAvg>0?`<span class="${livePrice>=weightedAvg?'profit':'loss'}">Precio actual ${fmtInv(livePrice)} · ${((livePrice-weightedAvg)/weightedAvg*100)>=0?'+':''}${((livePrice-weightedAvg)/weightedAvg*100).toFixed(2)}% vs entrada</span>`:''}
           </div>
           <div class="ph-cols-header">
-            <span>Fecha</span><span>Unidades</span><span>Precio entrada</span><span>Total USD</span>${livePrice>0?'<span>P&L lote</span>':''}
+            <span>Fecha</span><span>Unidades</span><span>Precio entrada</span><span>${curLabel}</span>${livePrice>0?'<span>P&L lote</span>':''}
           </div>
           ${rows}`:'<p class="ph-empty">Sin compras registradas.</p>'}
         <button class="btn-small" style="margin-top:10px" onclick="openAddPurchaseModal('${inv.id}')">+ Registrar compra</button>
@@ -3004,10 +3019,10 @@ function investmentCard(inv) {
 
       ${hasLive ? `
         <div class="live-price-row">
-          <span class="live-price">${formatUSD(inv.marketPrice)}</span>
+          <span class="live-price">${fmtInv(inv.marketPrice)}</span>
           <span class="live-change ${changeUp?'up':'down'}">
             ${changeUp?'▲':'▼'} ${Math.abs(inv.marketChangePct||0).toFixed(2)}%
-            (${changeUp?'+':''}${formatUSD(inv.marketChange||0)})
+            (${changeUp?'+':''}${fmtInv(inv.marketChange||0)})
           </span>
           <span class="live-label">${inv.marketExchange||'Mercado'} · Precio en vivo</span>
         </div>
@@ -3016,20 +3031,20 @@ function investmentCard(inv) {
         </div>
       ` : inv.ticker ? `<div class="live-price-row"><span style="color:var(--muted);font-size:13px">⏳ Cargando precio para ${inv.ticker}…</span></div>` : ''}
 
-      ${avgCost>0?`<div class="inv-cost-basis">Precio prom. entrada: <strong>${formatUSD(avgCost)}</strong>${hasLive&&avgCost>0?` · <span class="${inv.marketPrice>=avgCost?'profit':'loss'}">${((inv.marketPrice-avgCost)/avgCost*100)>=0?'+':''}${((inv.marketPrice-avgCost)/avgCost*100).toFixed(2)}% vs precio actual</span>`:''}
+      ${avgCost>0?`<div class="inv-cost-basis">Precio prom. entrada: <strong>${fmtInv(avgCost)}</strong>${hasLive&&avgCost>0?` · <span class="${inv.marketPrice>=avgCost?'profit':'loss'}">${((inv.marketPrice-avgCost)/avgCost*100)>=0?'+':''}${((inv.marketPrice-avgCost)/avgCost*100).toFixed(2)}% vs precio actual</span>`:''}
       </div>`:''}
       <div class="pnl-row">
         <div class="pnl-item">
           <div class="pnl-label">Invertido</div>
-          <div class="pnl-value">${formatUSD(investedUSD)}</div>
+          <div class="pnl-value">${fmtInv(investedUSD)}</div>
         </div>
         <div class="pnl-item">
           <div class="pnl-label">Valor actual</div>
-          <div class="pnl-value">${formatUSD(currentUSD)}</div>
+          <div class="pnl-value">${fmtInv(currentUSD)}</div>
         </div>
         <div class="pnl-item">
           <div class="pnl-label">P&L total</div>
-          <div class="pnl-value ${pnlUSD>=0?'profit':'loss'}">${pnlUSD>=0?'+':''}${formatUSD(pnlUSD)}<br><small>${pct>=0?'+':''}${pct.toFixed(2)}%</small></div>
+          <div class="pnl-value ${pnlUSD>=0?'profit':'loss'}">${pnlUSD>=0?'+':''}${fmtInv(pnlUSD)}<br><small>${pct>=0?'+':''}${pct.toFixed(2)}%</small></div>
         </div>
       </div>
 
@@ -3039,7 +3054,7 @@ function investmentCard(inv) {
         <div class="inv-repair-banner">
           <div>
             <strong>⚠️ Precio de compra sin registrar</strong><br>
-            <span>Invertiste ${formatUSD(investedUSD)}${hasLive ? ` · precio hoy: ${formatUSD(inv.marketPrice)}` : ''}. Ingresa el precio que pagaste para ver tu ganancia real.</span>
+            <span>Invertiste ${fmtInv(investedUSD)}${hasLive ? ` · precio hoy: ${fmtInv(inv.marketPrice)}` : ''}. Ingresa el precio que pagaste para ver tu ganancia real.</span>
           </div>
           <button class="inv-repair-btn" onclick="openEditPurchaseModal('${(purchases[0]||{}).id||''}')">Corregir ✏️</button>
         </div>
