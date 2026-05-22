@@ -2352,12 +2352,51 @@ async function submitEditInvestment(e, id) {
 
 /* ── Confirm delete ──────────────────────────────────────── */
 function confirmDelete(entity, id) {
+  let title = '¿Eliminar?';
+  let detail = '';
+  let warning = '';
+
+  if (entity === 'tx') {
+    const tx = state.transactions.find(t => t.id === id);
+    if (tx) {
+      detail = `<p class="confirm-detail">"${tx.description}"<br><strong>${formatUSD(Math.abs(tx.amount))}</strong></p>`;
+    }
+  } else if (entity === 'savings') {
+    const sg = state.savings.find(s => s.id === id);
+    if (sg) {
+      detail = `<p class="confirm-detail">"${sg.name}"<br><strong>${formatUSD(sg.saved)}</strong> ahorrados</p>`;
+    }
+  } else if (entity === 'inv') {
+    const inv = state.investments.find(i => i.id === id);
+    if (inv) {
+      const lotCount = state.investmentPurchases.filter(p => p.investmentId === id).length;
+      detail = `<p class="confirm-detail">${inv.name}${inv.ticker ? ` (${inv.ticker})` : ''}</p>`;
+      if (lotCount > 0) {
+        warning = `<div class="confirm-warning">⚠️ También se eliminarán ${lotCount} lote${lotCount > 1 ? 's' : ''} de compra del historial.</div>`;
+      }
+    }
+  } else if (entity === 'sub') {
+    const sub = state.subscriptions.find(s => s.id === id);
+    if (sub) {
+      detail = `<p class="confirm-detail">"${sub.name}"<br><strong>${formatUSD(sub.amount)}/mes</strong></p>`;
+    }
+  } else if (entity === 'purchase') {
+    const p = state.investmentPurchases.find(x => x.id === id);
+    if (p) {
+      const inv = state.investments.find(i => i.id === p.investmentId);
+      const invName = inv ? `${inv.name}${inv.ticker ? ` (${inv.ticker})` : ''}` : '';
+      detail = `<p class="confirm-detail">${invName}<br>${p.shares} unidades · ${formatUSD(p.priceUSD)} c/u · ${dateStr(p.date)}</p>`;
+    }
+  }
+
   openModal(`
     <div class="modal-header">
-      <h2 class="modal-title">¿Eliminar?</h2>
+      <h2 class="modal-title">${title}</h2>
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
-    <p style="color:var(--text-secondary);margin-bottom:24px">Esta acción no se puede deshacer.</p>
+    ${detail}
+    ${warning}
+    <p style="color:var(--text-secondary);margin-bottom:24px;font-size:13px">Esta acción no se puede deshacer.</p>
     <div style="display:flex;gap:12px">
       <button class="btn-secondary" style="flex:1" onclick="closeModal()">Cancelar</button>
       <button class="btn-danger"    style="flex:1" onclick="doDelete('${entity}','${id}')">Eliminar</button>
@@ -2365,10 +2404,11 @@ function confirmDelete(entity, id) {
 }
 async function doDelete(entity, id) {
   closeModal();
-  if (entity==='tx')      await deleteTransaction(id);
-  if (entity==='savings') await deleteSavingsGoal(id);
-  if (entity==='inv')     await deleteInvestment(id);
-  if (entity==='sub')     await deleteSubscription(id);
+  if (entity === 'tx')       await deleteTransaction(id);
+  if (entity === 'savings')  await deleteSavingsGoal(id);
+  if (entity === 'inv')      await deleteInvestment(id);
+  if (entity === 'sub')      await deleteSubscription(id);
+  if (entity === 'purchase') await deleteInvestmentPurchase(id);
 }
 
 /* ── ID-based edit wrappers (avoid JSON.stringify in onclick) ── */
@@ -2946,7 +2986,7 @@ function purchaseHistorySection(inv) {
         <span class="ph-usd">${fmtInv(p.amountUSD||costUSD)}</span>
         ${livePrice>0?`<span class="ph-pnl ${lotPnlUSD>=0?'profit':'loss'}">${lotPnlUSD>=0?'+':''}${fmtInv(lotPnlUSD)}<br><small>${lotPct>=0?'+':''}${lotPct.toFixed(1)}%</small></span>`:''}
         <button class="ph-del-btn" onclick="openEditPurchaseModal('${p.id}')" title="Editar lote">✏️</button>
-        <button class="ph-del-btn" onclick="deleteInvestmentPurchase('${p.id}')" title="Eliminar lote">🗑️</button>
+        <button class="ph-del-btn" onclick="confirmDelete('purchase','${p.id}')" title="Eliminar lote">🗑️</button>
       </div>`;
   }).join('');
 
@@ -3175,19 +3215,78 @@ async function enableNotifications() {
   }
 }
 
-/* ── Prevent pull-to-refresh on Android PWA ─────────────── */
+/* ── Pull-to-refresh ─────────────────────────────────────── */
 (function() {
-  let startY = 0;
-  document.addEventListener('touchstart', e => {
-    startY = e.touches[0].clientY;
-  }, { passive: true });
-  document.addEventListener('touchmove', e => {
-    const el = e.target.closest('[data-scroll]') || document.scrollingElement;
-    const atTop = (el ? el.scrollTop : window.scrollY) <= 0;
-    if (atTop && e.touches[0].clientY > startY) {
-      e.preventDefault();
+  const THRESHOLD = 72;   // px drag needed to trigger
+  const MAX_DRAG  = 100;  // max visual drag distance
+  let startY = 0, dragging = false, ptrActive = false;
+
+  function getIndicator() {
+    let el = document.getElementById('ptr-indicator');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'ptr-indicator';
+      el.innerHTML = '<div class="ptr-spinner"></div><span class="ptr-label">Suelta para actualizar</span>';
+      document.body.prepend(el);
     }
+    return el;
+  }
+
+  document.addEventListener('touchstart', e => {
+    const scrollEl = document.getElementById('app-content');
+    if (!scrollEl) return;
+    const atTop = scrollEl.scrollTop <= 0;
+    if (atTop && !ptrActive) {
+      startY = e.touches[0].clientY;
+      dragging = true;
+    }
+  }, { passive: true });
+
+  document.addEventListener('touchmove', e => {
+    if (!dragging) return;
+    const dy = e.touches[0].clientY - startY;
+    if (dy <= 0) { dragging = false; return; }
+    e.preventDefault();
+    const pull = Math.min(dy, MAX_DRAG);
+    const ind = getIndicator();
+    ind.style.transform = `translateY(${pull - 56}px)`;
+    ind.style.opacity = String(Math.min(pull / THRESHOLD, 1));
+    ind.classList.toggle('ptr-ready', pull >= THRESHOLD);
+    const label = ind.querySelector('.ptr-label');
+    if (label) label.textContent = pull >= THRESHOLD ? 'Suelta para actualizar' : 'Arrastra para actualizar';
   }, { passive: false });
+
+  document.addEventListener('touchend', async () => {
+    if (!dragging) return;
+    dragging = false;
+    const ind = document.getElementById('ptr-indicator');
+    if (!ind) return;
+    const triggered = ind.classList.contains('ptr-ready');
+    ind.style.transform = '';
+    ind.style.opacity = '0';
+    ind.classList.remove('ptr-ready');
+    if (!triggered || ptrActive || !state.token) return;
+    ptrActive = true;
+    ind.style.opacity = '1';
+    ind.style.transform = 'translateY(0px)';
+    ind.classList.add('ptr-syncing');
+    const label = ind.querySelector('.ptr-label');
+    if (label) label.textContent = 'Actualizando…';
+    try {
+      updateSyncBadge('Sincronizando…', 'syncing');
+      await syncFromSheets();
+      if (state.investments.some(i => i.ticker)) await refreshInvestmentPrices();
+      updateSyncBadge('Sincronizado ✓', 'synced');
+      renderView();
+    } catch(e) {
+      updateSyncBadge('Error al sincronizar', 'error');
+    } finally {
+      ind.classList.remove('ptr-syncing');
+      ind.style.opacity = '0';
+      ind.style.transform = '';
+      ptrActive = false;
+    }
+  });
 })();
 
 /* ── Boot ────────────────────────────────────────────────── */
