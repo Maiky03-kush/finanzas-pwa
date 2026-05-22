@@ -21,6 +21,7 @@ let state = {
   addType: 'Gasto', addPaymentMethod: 'Efectivo',
   txFilter: 'Gasto', txSearch: '',
   savingsSubTab: 'goals',
+  snapshotRange: 12,
   usdCopRate: 4200,
   priceRefreshTimer: null,
   pricesLastUpdated: null,
@@ -215,6 +216,172 @@ function buildDonutSVG(segments) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" style="flex-shrink:0">${arcs.join('')}</svg>`;
 }
 
+function fmtYAxis(v) {
+  const abs = Math.abs(v);
+  if (abs >= 1_000_000_000) return (v / 1_000_000_000).toFixed(1) + 'B';
+  if (abs >= 1_000_000)     return (v / 1_000_000).toFixed(1) + 'M';
+  if (abs >= 1_000)         return (v / 1_000).toFixed(0) + 'K';
+  return v.toFixed(0);
+}
+
+function buildPatrimonioSVG(snaps) {
+  const W = 400, H = 180;
+  const PAD = { top: 14, right: 12, bottom: 32, left: 56 };
+  const pw = W - PAD.left - PAD.right;
+  const ph = H - PAD.top  - PAD.bottom;
+
+  const vals = snaps.map(s => s.patrimonioCOP);
+  const rawMin = Math.min(...vals), rawMax = Math.max(...vals);
+  const margin = (rawMax - rawMin) * 0.1 || rawMax * 0.05 || 1;
+  const mn = rawMin - margin, mx = rawMax + margin;
+  const rng = mx - mn;
+
+  const toX = i => PAD.left + (snaps.length > 1 ? (i / (snaps.length - 1)) * pw : pw / 2);
+  const toY = v => PAD.top + ph - ((v - mn) / rng) * ph;
+
+  const isUp  = vals[vals.length - 1] >= vals[0];
+  const col   = isUp ? '#34C759' : '#FF3B30';
+  const pts   = snaps.map((s, i) => `${toX(i).toFixed(1)},${toY(s.patrimonioCOP).toFixed(1)}`).join(' ');
+  const areaL = `${toX(0).toFixed(1)},${(PAD.top + ph).toFixed(1)}`;
+  const areaR = `${toX(snaps.length - 1).toFixed(1)},${(PAD.top + ph).toFixed(1)}`;
+
+  // Y ticks
+  const tickCount = 4;
+  const yTicks = Array.from({ length: tickCount + 1 }, (_, i) => mn + (rng * i / tickCount));
+
+  // X labels — skip intermediate ones if too crowded
+  const step = snaps.length > 9 ? 3 : snaps.length > 6 ? 2 : 1;
+
+  // Store data for hover handler (keyed by chart id)
+  window._pcData = { snaps, toX, toY, col, PAD, ph };
+
+  return `
+    <svg id="patr-svg" viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="none" style="overflow:visible;display:block">
+      <defs>
+        <linearGradient id="patr-grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="${col}" stop-opacity="0.22"/>
+          <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
+        </linearGradient>
+        <clipPath id="patr-clip">
+          <rect x="${PAD.left}" y="${PAD.top}" width="${pw}" height="${ph}"/>
+        </clipPath>
+      </defs>
+
+      ${yTicks.map(v => {
+        const y = toY(v).toFixed(1);
+        return `<line x1="${PAD.left}" y1="${y}" x2="${W - PAD.right}" y2="${y}"
+                  stroke="var(--border)" stroke-width="0.7" stroke-dasharray="3,4"/>
+                <text x="${(PAD.left - 7).toFixed(0)}" y="${y}" text-anchor="end"
+                  dominant-baseline="middle" font-size="9.5" fill="var(--muted)"
+                  font-family="system-ui,sans-serif">${fmtYAxis(v)}</text>`;
+      }).join('')}
+
+      ${snaps.map((s, i) => {
+        if (i % step !== 0 && i !== snaps.length - 1) return '';
+        const label = new Date(s.month + '-02').toLocaleDateString('es-CO', { month: 'short', year: '2-digit' });
+        return `<text x="${toX(i).toFixed(1)}" y="${(PAD.top + ph + 18).toFixed(1)}"
+                  text-anchor="middle" font-size="9.5" fill="var(--muted)"
+                  font-family="system-ui,sans-serif">${label}</text>`;
+      }).join('')}
+
+      <polygon points="${areaL} ${pts} ${areaR}" fill="url(#patr-grad)" clip-path="url(#patr-clip)"/>
+      <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="2.2"
+        stroke-linejoin="round" stroke-linecap="round" clip-path="url(#patr-clip)"/>
+
+      ${snaps.map((s, i) => `
+        <circle cx="${toX(i).toFixed(1)}" cy="${toY(s.patrimonioCOP).toFixed(1)}"
+          r="3.5" fill="${col}" stroke="var(--card)" stroke-width="1.8"/>
+      `).join('')}
+
+      <line id="patr-hline" x1="0" y1="${PAD.top}" x2="0" y2="${PAD.top + ph}"
+        stroke="${col}" stroke-width="1" stroke-dasharray="4,3" opacity="0"/>
+      <circle id="patr-hdot" cx="0" cy="0" r="5" fill="${col}"
+        stroke="var(--card)" stroke-width="2" opacity="0"/>
+
+      <rect id="patr-overlay"
+        x="${PAD.left}" y="${PAD.top}" width="${pw}" height="${ph}"
+        fill="transparent" style="cursor:crosshair"/>
+    </svg>
+    <div id="patr-tip" style="display:none;position:absolute;background:var(--card);
+      border:1px solid var(--border);border-radius:10px;padding:8px 12px;
+      font-size:12px;pointer-events:none;z-index:20;box-shadow:var(--shadow);
+      min-width:140px"></div>`;
+}
+
+function setPatrimonioRange(months) {
+  state.snapshotRange = months;
+  renderView();
+}
+
+function initPatrimonioChart() {
+  const overlay = document.getElementById('patr-overlay');
+  const svg     = document.getElementById('patr-svg');
+  const hline   = document.getElementById('patr-hline');
+  const hdot    = document.getElementById('patr-hdot');
+  const tip     = document.getElementById('patr-tip');
+  if (!overlay || !window._pcData) return;
+
+  const { snaps, toX, toY, col, PAD, ph } = window._pcData;
+
+  function getNearestIdx(clientX) {
+    const rect = svg.getBoundingClientRect();
+    const scaleX = 400 / rect.width;
+    const svgX   = (clientX - rect.left) * scaleX;
+    let best = 0, bestDist = Infinity;
+    snaps.forEach((_, i) => {
+      const d = Math.abs(toX(i) - svgX);
+      if (d < bestDist) { bestDist = d; best = i; }
+    });
+    return best;
+  }
+
+  function showTip(clientX, containerRect) {
+    const idx  = getNearestIdx(clientX);
+    const snap = snaps[idx];
+    const prev = snaps[idx - 1];
+    const delta = prev ? snap.patrimonioCOP - prev.patrimonioCOP : null;
+    const rate  = state.usdCopRate || 4200;
+    const label = new Date(snap.month + '-02').toLocaleDateString('es-CO', { month: 'long', year: 'numeric' });
+
+    hline.setAttribute('x1', toX(idx).toFixed(1));
+    hline.setAttribute('x2', toX(idx).toFixed(1));
+    hline.setAttribute('opacity', '0.7');
+    hdot.setAttribute('cx', toX(idx).toFixed(1));
+    hdot.setAttribute('cy', toY(snap.patrimonioCOP).toFixed(1));
+    hdot.setAttribute('opacity', '1');
+
+    tip.style.display = 'block';
+    tip.innerHTML = `
+      <div style="font-weight:700;margin-bottom:5px;color:var(--text)">${label}</div>
+      <div style="color:var(--muted);font-size:11px;margin-bottom:2px">Patrimonio</div>
+      <div style="font-weight:600;font-size:14px;color:var(--text)">${formatCOP(snap.patrimonioCOP)}</div>
+      ${delta !== null ? `<div style="font-size:11px;margin-top:3px;color:${delta >= 0 ? '#34C759' : '#FF3B30'}">${delta >= 0 ? '+' : ''}${formatCOP(delta)} vs mes anterior</div>` : ''}
+      <div style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px;font-size:11px;color:var(--muted)">
+        Portafolio ${formatCOP(snap.portfolioUSD * rate)}<br>
+        Balance ${formatCOP(snap.balanceCOP)}
+      </div>`;
+
+    const svgRect  = svg.getBoundingClientRect();
+    const wrapRect = svg.closest('.patr-chart-wrap').getBoundingClientRect();
+    const dotX     = toX(idx) / 400 * svgRect.width;
+    const dotY     = toY(snap.patrimonioCOP) / 180 * svgRect.height;
+    const tipW     = 160;
+    let left = dotX + svgRect.left - wrapRect.left + 10;
+    if (left + tipW > wrapRect.width) left = dotX + svgRect.left - wrapRect.left - tipW - 10;
+    tip.style.left = left + 'px';
+    tip.style.top  = Math.max(0, dotY + svgRect.top - wrapRect.top - 30) + 'px';
+  }
+
+  overlay.addEventListener('mousemove', e => showTip(e.clientX));
+  overlay.addEventListener('touchmove',  e => { e.preventDefault(); showTip(e.touches[0].clientX); }, { passive: false });
+  overlay.addEventListener('mouseleave', () => {
+    hline.setAttribute('opacity', '0'); hdot.setAttribute('opacity', '0'); tip.style.display = 'none';
+  });
+  overlay.addEventListener('touchend', () => {
+    setTimeout(() => { hline.setAttribute('opacity', '0'); hdot.setAttribute('opacity', '0'); tip.style.display = 'none'; }, 1500);
+  });
+}
+
 function renderPatrimonioPanel() {
   const rate       = state.usdCopRate || 4200;
   const balanceCOP = getBalance();
@@ -228,65 +395,54 @@ function renderPatrimonioPanel() {
   const patrimonioCOP = balanceCOP + portfolioCOP;
   const pnlCOP        = (totalCurUSD - totalInvUSD) * rate;
 
-  // Build mini sparkline from snapshots (patrimonio over time)
-  const snaps = state.snapshots.slice(-6); // last 6 months
-  let sparkHtml = '';
-  if (snaps.length >= 2) {
-    const vals = snaps.map(s => s.patrimonioCOP);
-    const mn = Math.min(...vals), mx = Math.max(...vals), rng = mx - mn || 1;
-    const W = 260, H = 40, pad = 4;
-    const toX = i  => pad + (i / (vals.length - 1)) * (W - pad * 2);
-    const toY = v  => H - pad - ((v - mn) / rng) * (H - pad * 2);
-    const pts  = vals.map((v, i) => `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).join(' ');
-    const isUp = vals[vals.length - 1] >= vals[0];
-    const col  = isUp ? '#34C759' : '#FF3B30';
-    const fillId = 'pf_spark';
-    sparkHtml = `
-      <div class="patrimonio-spark">
-        <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">
-          <defs>
-            <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="${col}" stop-opacity="0.15"/>
-              <stop offset="100%" stop-color="${col}" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-          <polygon points="${toX(0).toFixed(1)},${(H-pad).toFixed(1)} ${pts} ${toX(vals.length-1).toFixed(1)},${(H-pad).toFixed(1)}" fill="url(#${fillId})"/>
-          <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
-          <circle cx="${toX(vals.length-1).toFixed(1)}" cy="${toY(vals[vals.length-1]).toFixed(1)}" r="3" fill="${col}"/>
-        </svg>
-        <div class="patrimonio-spark-labels">
-          ${snaps.map(s => `<span>${s.month.slice(0,7).replace('-','/')}</span>`).join('')}
-        </div>
-      </div>`;
-  }
+  // Filter snapshots by selected range
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - state.snapshotRange);
+  const cutKey = cutoff.toISOString().slice(0, 7);
+  const allSnaps  = state.snapshots;
+  const snaps = state.snapshotRange >= 999
+    ? allSnaps
+    : allSnaps.filter(s => s.month >= cutKey);
 
-  // Snapshot history table
-  let histHtml = '';
-  if (snaps.length >= 2) {
-    histHtml = `
-      <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">
-        <div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:8px">HISTORIAL MENSUAL</div>
-        <table class="summary-table">
-          <thead><tr><th>Mes</th><th>Portafolio</th><th>Balance</th><th>Patrimonio</th></tr></thead>
-          <tbody>
-            ${[...snaps].reverse().map((s, idx, arr) => {
-              const prev = arr[idx + 1];
-              const delta = prev ? s.patrimonioCOP - prev.patrimonioCOP : 0;
-              const label = new Date(s.month + '-02').toLocaleDateString('es-CO', { month: 'short', year: '2-digit' });
-              return `<tr>
-                <td>${label}</td>
-                <td>${formatCOP(s.portfolioUSD * rate)}</td>
-                <td>${formatCOP(s.balanceCOP)}</td>
-                <td>
-                  ${formatCOP(s.patrimonioCOP)}
-                  ${prev ? `<br><small class="${delta >= 0 ? 'col-income' : 'col-expense'}">${delta >= 0 ? '+' : ''}${formatCOP(delta)}</small>` : ''}
-                </td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table>
-      </div>`;
-  }
+  const ranges = [
+    { label: '3M', val: 3 }, { label: '6M', val: 6 },
+    { label: '12M', val: 12 }, { label: 'Todo', val: 999 }
+  ];
+
+  const chartHtml = snaps.length >= 2
+    ? `<div class="patr-chart-wrap" style="position:relative;margin:16px 0 4px">
+        ${buildPatrimonioSVG(snaps)}
+      </div>`
+    : `<p style="text-align:center;color:var(--muted);font-size:13px;padding:24px 0">
+        Sin historial aún — vuelve el próximo mes para ver el gráfico.
+      </p>`;
+
+  // History table (last 6 entries max, reversed)
+  const tableSnaps = [...snaps].reverse().slice(0, 6);
+  const histHtml = snaps.length >= 2 ? `
+    <details style="margin-top:14px">
+      <summary style="font-size:11px;font-weight:600;color:var(--muted);cursor:pointer;list-style:none;display:flex;align-items:center;gap:4px">
+        <span>HISTORIAL MENSUAL</span><span style="margin-left:auto;font-size:10px">▼</span>
+      </summary>
+      <table class="summary-table" style="margin-top:8px">
+        <thead><tr><th>Mes</th><th>Portafolio</th><th>Balance</th><th>Patrimonio</th></tr></thead>
+        <tbody>
+          ${tableSnaps.map((s, idx, arr) => {
+            const prev  = arr[idx + 1];
+            const delta = prev ? s.patrimonioCOP - prev.patrimonioCOP : 0;
+            const label = new Date(s.month + '-02').toLocaleDateString('es-CO', { month: 'short', year: '2-digit' });
+            return `<tr>
+              <td>${label}</td>
+              <td>${formatCOP(s.portfolioUSD * rate)}</td>
+              <td>${formatCOP(s.balanceCOP)}</td>
+              <td>${formatCOP(s.patrimonioCOP)}
+                ${prev ? `<br><small class="${delta >= 0 ? 'col-income' : 'col-expense'}">${delta >= 0 ? '+' : ''}${formatCOP(delta)}</small>` : ''}
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </details>` : '';
 
   return `
     <div class="section-header">
@@ -313,7 +469,11 @@ function renderPatrimonioPanel() {
           </div>
         </div>
       </div>
-      ${sparkHtml}
+      <div class="patr-range-btns">
+        ${ranges.map(r => `<button class="patr-range-btn${state.snapshotRange === r.val ? ' active' : ''}"
+          onclick="setPatrimonioRange(${r.val})">${r.label}</button>`).join('')}
+      </div>
+      ${chartHtml}
       ${histHtml}
     </div>`;
 }
@@ -2154,6 +2314,7 @@ function renderDashboard() {
 
       ${!hasTx ? `<p class="empty-state">Sin datos todavía.<br>Toca + para agregar tu primera transacción.</p>` : ''}
     </div>`;
+  requestAnimationFrame(initPatrimonioChart);
 }
 
 /* ════════════════════════════════════════════════════════════
