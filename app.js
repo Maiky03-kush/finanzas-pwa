@@ -782,7 +782,7 @@ async function ensureSpreadsheet() {
     resource:{ valueInputOption:'RAW', data:[
       { range:'Transacciones!A1:G1', values:[['ID','Fecha','Tipo','Categoría','Descripción','Monto','Pago']] },
       { range:'Ahorro!A1:F1',        values:[['ID','Nombre','Meta','Actual','Fecha Límite','Notas']] },
-      { range:'Inversiones!A1:N1',   values:[['ID','Nombre','Ticker','Tipo','Invertido $','Valor Actual (App)','Acciones','Precio Compra $','Notas','Ganancia $','Ganancia %','Precio GFIN $','Valor GFIN $','Δ App vs GFIN']] },
+      { range:'Inversiones!A1:P1',   values:[['ID','Nombre','Ticker','Tipo','Invertido $','Valor Actual (App)','Acciones','Precio Compra $','Notas','Ganancia $','Ganancia %','Precio GFIN $','Valor GFIN $','Δ App vs GFIN','Invertido ∑Compras','Acciones ∑Compras']] },
       { range:'Compras_Inv!A1:F1',   values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoUSD']] },
       { range:'Suscripciones!A1:H1', values:[['ID','Nombre','Monto','Moneda','Frecuencia','ProximoPago','Categoria','Notas']] },
       { range:'Precios!A1:C1',       values:[['Ticker','Precio Live (GFIN)','Última actualización']] }
@@ -790,7 +790,7 @@ async function ensureSpreadsheet() {
   });
   // Precios tab first so VLOOKUP formulas below don't get a #REF! on creation
   await ensurePreciosSheet();
-  // Sheet-managed formulas for Inversiones (app never writes to J:N)
+  // Sheet-managed formulas for Inversiones (app never writes to J:P)
   try {
     await gapi.client.sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: state.spreadsheetId,
@@ -799,7 +799,9 @@ async function ensureSpreadsheet() {
         { range:'Inversiones!K2', values:[['=ARRAYFORMULA((F2:F-E2:E)/(E2:E+(E2:E=0))*100)']] },
         { range:'Inversiones!L2', values:[['=ARRAYFORMULA(IFERROR(VLOOKUP(C2:C,Precios!$A:$B,2,0),""))']] },
         { range:'Inversiones!M2', values:[['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0),""))']] },
-        { range:'Inversiones!N2', values:[['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0)-F2:F,""))']] }
+        { range:'Inversiones!N2', values:[['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0)-F2:F,""))']] },
+        { range:'Inversiones!O2', values:[['=ARRAYFORMULA(IF(A2:A="","",SUMIF(Compras_Inv!B:B,A2:A,Compras_Inv!F:F)))']] },
+        { range:'Inversiones!P2', values:[['=ARRAYFORMULA(IF(A2:A="","",SUMIF(Compras_Inv!B:B,A2:A,Compras_Inv!D:D)))']] }
       ]}
     });
   } catch(e) { console.warn('ensureSpreadsheet formulas:', e); }
@@ -919,8 +921,18 @@ async function migrateInversionesFormulas() {
         // M: shares × live price — IFERROR handles missing price gracefully
         { range: 'Inversiones!M2', values: [['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0),""))']] },
         // N: delta between GFIN value and app-written value (validation column)
-        { range: 'Inversiones!N2', values: [['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0)-F2:F,""))']] }
+        { range: 'Inversiones!N2', values: [['=ARRAYFORMULA(IFERROR(G2:G*VLOOKUP(C2:C,Precios!$A:$B,2,0)-F2:F,""))']] },
+        // O: sum of amountUSD from Compras_Inv — audit column to verify E matches
+        { range: 'Inversiones!O2', values: [['=ARRAYFORMULA(IF(A2:A="","",SUMIF(Compras_Inv!B:B,A2:A,Compras_Inv!F:F)))']] },
+        // P: sum of shares from Compras_Inv — audit column to verify G matches
+        { range: 'Inversiones!P2', values: [['=ARRAYFORMULA(IF(A2:A="","",SUMIF(Compras_Inv!B:B,A2:A,Compras_Inv!D:D)))']] }
       ]}
+    });
+    await gapi.client.sheets.spreadsheets.values.update({
+      spreadsheetId: state.spreadsheetId,
+      range: 'Inversiones!O1:P1',
+      valueInputOption: 'RAW',
+      resource: { values: [['Invertido ∑Compras','Acciones ∑Compras']] }
     });
   } catch(e) { console.warn('migrateInversionesFormulas:', e); }
 }
@@ -1001,13 +1013,14 @@ async function loadSnapshots() {
 
 async function syncFromSheets() {
   if (!state.spreadsheetId || !state.accessToken) return;
-  // Migration v4: fix formula order (Precios tab first) + simplified M/N
-  if (!localStorage.getItem('finanzas_formulas_v4')) {
+  // Migration v5: add Compras_Inv audit columns O:P (Invertido ∑Compras, Acciones ∑Compras)
+  if (!localStorage.getItem('finanzas_formulas_v5')) {
     localStorage.removeItem('finanzas_formulas_v1');
     localStorage.removeItem('finanzas_formulas_v2');
     localStorage.removeItem('finanzas_formulas_v3');
+    localStorage.removeItem('finanzas_formulas_v4');
     await migrateInversionesFormulas();
-    localStorage.setItem('finanzas_formulas_v4', '1');
+    localStorage.setItem('finanzas_formulas_v5', '1');
   }
   try {
     const resp = await gapi.client.sheets.spreadsheets.values.batchGet({
@@ -1069,16 +1082,20 @@ async function syncFromSheets() {
       for (const p of repairedPurchases) {
         try { await updateRowById('Compras_Inv', p.id, [p.id,p.investmentId,p.date,p.shares,p.priceUSD,p.amountUSD]); } catch(e) {}
       }
-      // Only recalc and persist investments whose purchases were actually repaired.
-      // Do NOT recalculate all investments — that would zero out shares for investments
-      // like SCHD/ETH-USD whose purchases have amountUSD=0 (user must fix manually).
-      if (repairedPurchases.length > 0) {
-        const repairedInvIds = new Set(repairedPurchases.map(p => p.investmentId));
-        repairedInvIds.forEach(invId => recalcInvestment(invId));
-        for (const inv of state.investments) {
-          if (inv.invested > 0 && repairedInvIds.has(inv.id)) {
-            try { await updateRowById('Inversiones', inv.id, invArr(inv)); } catch(e) {}
-          }
+      // Recalc all investments that have purchases with real amountUSD > 0.
+      // Guards against stale Inversiones rows when a 2nd purchase was added but
+      // the sheet write failed (network/offline). Skips investments whose purchases
+      // all have amountUSD=0 (e.g. SCHD/ETH-USD manually entered) to avoid zeroing invested.
+      const purchasedInvIds = new Set(
+        state.investmentPurchases.filter(p => p.amountUSD > 0).map(p => p.investmentId)
+      );
+      for (const invId of purchasedInvIds) {
+        const inv = state.investments.find(i => i.id === invId);
+        if (!inv) continue;
+        const prevShares = inv.shares, prevInvested = inv.invested, prevPrice = inv.purchasePrice;
+        recalcInvestment(invId);
+        if (inv.shares !== prevShares || Math.abs(inv.invested - prevInvested) > 0.001 || Math.abs(inv.purchasePrice - prevPrice) > 0.001) {
+          try { await updateRowById('Inversiones', inv.id, invArr(inv)); } catch(e) {}
         }
       }
     } catch(e) { await ensureComprasInvSheet(); }
