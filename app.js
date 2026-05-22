@@ -14,6 +14,8 @@ let state = {
   user: null, accessToken: null, spreadsheetId: null,
   transactions: [], savings: [], investments: [], investmentPurchases: [],
   subscriptions: [], alerts: [], snapshots: [], budgets: [],
+  benchmarks: {},          // { spy: { ytdPct, name }, btc: { ytdPct, name }, fetchedAt }
+  benchmarksFetching: false,
   view: 'dashboard', syncing: false,
   tokenRefreshTimer: null,
   gapiReady: false,
@@ -531,12 +533,65 @@ function renderPortfolioPanel() {
             </div>`).join('')}
         </div>
       </div>` : ''}
+      ${renderBenchmarkBar()}
     </div>`;
 }
 
 /* ══════════════════════════════════════════════════════════
    MARKET DATA — Yahoo Finance via local proxy
    ══════════════════════════════════════════════════════════ */
+function renderBenchmarkBar() {
+  const bm      = state.benchmarks;
+  const portYtd = getPortfolioYtdPct();
+  const year    = new Date().getFullYear();
+  const hasSnap = state.snapshots.some(s => s.month.startsWith(year));
+
+  const fmt = pct => pct === null
+    ? '<span style="color:var(--muted)">—</span>'
+    : `<span style="color:${pct >= 0 ? 'var(--green)' : 'var(--red)'}; font-weight:700">
+        ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%
+       </span>`;
+
+  const col = (pct, ref) => {
+    if (pct === null || ref === null) return 'var(--muted)';
+    return pct >= ref ? 'var(--green)' : 'var(--red)';
+  };
+
+  const spyPct = bm.spy?.ytdPct ?? null;
+  const btcPct = bm.btc?.ytdPct ?? null;
+  const loading = !bm.fetchedAt;
+
+  return `
+    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+      <div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:10px;letter-spacing:.4px">
+        RENDIMIENTO ${year} (YTD)${!hasSnap ? ' · <span style="font-weight:400;font-style:italic">P&L total sin snapshot de enero</span>' : ''}
+      </div>
+      ${loading
+        ? `<div style="color:var(--muted);font-size:13px">Cargando benchmarks…</div>`
+        : `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center">
+            <div style="background:var(--bg);border-radius:10px;padding:10px 6px">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Tu portafolio</div>
+              <div style="font-size:18px">${fmt(portYtd)}</div>
+            </div>
+            <div style="background:var(--bg);border-radius:10px;padding:10px 6px;position:relative">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:4px">SPY (S&amp;P500)</div>
+              <div style="font-size:18px">${fmt(spyPct)}</div>
+              ${portYtd !== null && spyPct !== null
+                ? `<div style="font-size:10px;color:${col(portYtd, spyPct)};margin-top:2px">
+                    ${portYtd >= spyPct ? '▲ le ganas' : '▼ te supera'}
+                   </div>` : ''}
+            </div>
+            <div style="background:var(--bg);border-radius:10px;padding:10px 6px">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:4px">BTC</div>
+              <div style="font-size:18px">${fmt(btcPct)}</div>
+              ${portYtd !== null && btcPct !== null
+                ? `<div style="font-size:10px;color:${col(portYtd, btcPct)};margin-top:2px">
+                    ${portYtd >= btcPct ? '▲ le ganas' : '▼ te supera'}
+                   </div>` : ''}
+            </div>
+          </div>`}
+    </div>`;
+}
 function normalizeTicker(t) {
   const s = (t||'').toUpperCase().trim();
   if (/^[A-Z]{2,10}USD$/.test(s) && !s.includes('-')) return s.slice(0,-3)+'-USD';
@@ -637,6 +692,52 @@ async function fetchSearch(query) {
   } catch(e) { return []; }
 }
 
+async function fetchBenchmarks() {
+  const CACHE_MS = 5 * 60 * 1000;
+  if (state.benchmarksFetching) return;
+  if (state.benchmarks.fetchedAt && Date.now() - state.benchmarks.fetchedAt < CACHE_MS) return;
+  state.benchmarksFetching = true;
+  try {
+    const [spyPrices, btcPrices] = await Promise.all([
+      fetchHistory('SPY', 'ytd'),
+      fetchHistory('BTC-USD', 'ytd')
+    ]);
+    const ytdPct = prices => prices && prices.length >= 2
+      ? ((prices[prices.length - 1] - prices[0]) / prices[0]) * 100
+      : null;
+    state.benchmarks = {
+      spy: spyPrices ? { ytdPct: ytdPct(spyPrices), name: 'SPY' } : null,
+      btc: btcPrices ? { ytdPct: ytdPct(btcPrices), name: 'BTC' } : null,
+      fetchedAt: Date.now()
+    };
+    if (state.view === 'dashboard' || state.view === 'investments') renderView();
+  } catch(e) { console.warn('fetchBenchmarks', e); }
+  finally { state.benchmarksFetching = false; }
+}
+
+function getPortfolioYtdPct() {
+  const year = new Date().getFullYear();
+  // Current portfolio value in USD
+  let currentUSD = 0;
+  state.investments.forEach(i => {
+    currentUSD += i.shares > 0 && i.marketPrice ? i.shares * i.marketPrice
+      : i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice
+      : Number(i.currentValue);
+  });
+  if (currentUSD === 0) return null;
+  // Year-start baseline: earliest snapshot of this year (portfolioUSD)
+  const yearSnap = state.snapshots.find(s => s.month.startsWith(year));
+  if (yearSnap && yearSnap.portfolioUSD > 0) {
+    return ((currentUSD - yearSnap.portfolioUSD) / yearSnap.portfolioUSD) * 100;
+  }
+  // Fallback: overall P&L vs cost basis (not strictly YTD but best available)
+  let investedUSD = 0;
+  state.investments.forEach(i => {
+    investedUSD += i.shares > 0 && i.purchasePrice > 0 ? i.shares * i.purchasePrice : Number(i.invested);
+  });
+  return investedUSD > 0 ? ((currentUSD - investedUSD) / investedUSD) * 100 : null;
+}
+
 async function fetchExchangeRate() {
   const q = await fetchQuote('USDCOP=X');
   if (q && q.price > 100) state.usdCopRate = q.price;
@@ -714,6 +815,7 @@ function checkAlerts() {
 
 async function refreshInvestmentPrices() {
   await fetchExchangeRate();
+  fetchBenchmarks(); // non-blocking, updates view when ready
   let updated = false;
   for (const inv of state.investments) {
     if (!inv.ticker) continue;
