@@ -910,6 +910,7 @@ async function onGapiReady() {
   }
   if (cbError) {
     window.history.replaceState({}, '', '/');
+    _onTokenFail();
     showReconnectCard(`Error de autenticación: ${cbError}`);
     return;
   }
@@ -924,13 +925,20 @@ async function onGapiReady() {
 async function tryServerToken() {
   try {
     const resp = await fetch('/auth/token');
-    if (resp.status === 401) { showReconnectCard(); return; }
+    if (resp.status === 401) { _onTokenFail(); return; }
     const data = await resp.json();
-    if (data.error) { showReconnectCard(); return; }
+    if (data.error) { _onTokenFail(); return; }
     await applyAccessToken(data.access_token, data.expires_in || 3600);
   } catch(e) {
-    showReconnectCard();
+    _onTokenFail();
   }
+}
+
+function _onTokenFail() {
+  state.accessToken = null;
+  updateAuthUI(false);
+  updateSyncBadge('Sin conexión', 'error');
+  showReconnectCard();
 }
 
 async function applyAccessToken(token, expiresIn) {
