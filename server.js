@@ -2,6 +2,7 @@ const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
 const path  = require('path');
+const zlib  = require('zlib');
 
 const PORT          = process.env.PORT || 3000;
 const ROOT          = __dirname;
@@ -21,6 +22,41 @@ const MIME = {
   '.svg':  'image/svg+xml',
 };
 
+// Cache-Control por tipo de archivo
+const CACHE_CONTROL = {
+  'sw.js':         'no-store',                                      // SW siempre fresco
+  '.html':         'no-cache',                                      // HTML siempre valida
+  'manifest.json': 'no-cache',                                      // manifest siempre valida
+  '.css':          'public, max-age=3600, stale-while-revalidate=86400',
+  '.js':           'public, max-age=3600, stale-while-revalidate=86400',
+  '.png':          'public, max-age=604800',                        // 7 días
+  '.ico':          'public, max-age=604800',
+  '.webp':         'public, max-age=604800',
+  '.svg':          'public, max-age=604800',
+};
+
+const COMPRESSIBLE = new Set(['.html', '.css', '.js', '.json', '.svg']);
+
+function cacheHeader(filename, ext) {
+  const base = path.basename(filename);
+  if (CACHE_CONTROL[base]) return CACHE_CONTROL[base];
+  return CACHE_CONTROL[ext] || 'no-cache';
+}
+
+function sendFile(req, res, statusCode, headers, data) {
+  const accept = req.headers['accept-encoding'] || '';
+  if (accept.includes('gzip')) {
+    zlib.gzip(data, (err, compressed) => {
+      if (err) { res.writeHead(statusCode, headers); res.end(data); return; }
+      res.writeHead(statusCode, { ...headers, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+      res.end(compressed);
+    });
+  } else {
+    res.writeHead(statusCode, headers);
+    res.end(data);
+  }
+}
+
 function googlePost(apiPath, body) {
   return new Promise((resolve, reject) => {
     const data = Object.entries(body)
@@ -39,7 +75,7 @@ function googlePost(apiPath, body) {
   });
 }
 
-function yahooFetch(url, res) {
+function yahooFetch(req, url, res) {
   const opts = {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
@@ -52,12 +88,12 @@ function yahooFetch(url, res) {
     let data = '';
     r.on('data', c => data += c);
     r.on('end', () => {
-      res.writeHead(r.statusCode || 200, secHeaders({
+      const headers = secHeaders({
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'no-cache'
-      }));
-      res.end(data);
+      });
+      sendFile(req, res, r.statusCode || 200, headers, Buffer.from(data));
     });
   }).on('error', (e) => {
     res.writeHead(502, secHeaders({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
@@ -96,6 +132,13 @@ http.createServer(async (req, res) => {
   }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  // ── /health ──────────────────────────────────────────────
+  if (url.pathname === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', uptime: Math.floor(process.uptime()) }));
+    return;
+  }
 
   // ── /auth/login ──────────────────────────────────────────
   if (url.pathname === '/auth/login') {
@@ -183,10 +226,7 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/api/quote') {
     const ticker = url.searchParams.get('ticker');
     if (!ticker) { res.writeHead(400); res.end('Missing ticker'); return; }
-    yahooFetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`,
-      res
-    );
+    yahooFetch(req, `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=1d`, res);
     return;
   }
 
@@ -195,10 +235,7 @@ http.createServer(async (req, res) => {
     const ticker = url.searchParams.get('ticker');
     const range  = url.searchParams.get('range') || '1mo';
     if (!ticker) { res.writeHead(400); res.end('Missing ticker'); return; }
-    yahooFetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${encodeURIComponent(range)}`,
-      res
-    );
+    yahooFetch(req, `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${encodeURIComponent(range)}`, res);
     return;
   }
 
@@ -206,14 +243,11 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/api/search') {
     const q = url.searchParams.get('q');
     if (!q) { res.writeHead(400); res.end('Missing q'); return; }
-    yahooFetch(
-      `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0&listsCount=0`,
-      res
-    );
+    yahooFetch(req, `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0&listsCount=0`, res);
     return;
   }
 
-  // ── Static files ────────────────────────────────────────
+  // ── Static files ─────────────────────────────────────────
   let urlPath = url.pathname;
   if (urlPath === '/') urlPath = '/index.html';
   const filePath = path.join(ROOT, urlPath);
@@ -223,13 +257,22 @@ http.createServer(async (req, res) => {
     if (err) {
       fs.readFile(path.join(ROOT, 'index.html'), (e2, d2) => {
         if (e2) { res.writeHead(404); res.end('Not found'); return; }
-        res.writeHead(200, secHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
-        res.end(d2);
+        const headers = secHeaders({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+        sendFile(req, res, 200, headers, d2);
       });
       return;
     }
-    res.writeHead(200, secHeaders({ 'Content-Type': MIME[ext] || 'application/octet-stream' }));
-    res.end(data);
+    const headers = secHeaders({
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Cache-Control': cacheHeader(filePath, ext)
+    });
+    const shouldCompress = COMPRESSIBLE.has(ext);
+    if (shouldCompress) {
+      sendFile(req, res, 200, headers, data);
+    } else {
+      res.writeHead(200, headers);
+      res.end(data);
+    }
   });
 
 }).listen(PORT, () => {
