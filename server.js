@@ -9,7 +9,18 @@ const ROOT          = __dirname;
 const CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || '';
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const BASE_URL      = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
-let   refreshToken  = process.env.GOOGLE_REFRESH_TOKEN || '';
+const TOKEN_FILE    = path.join('/tmp', 'finanzas_refresh_token');
+
+// Carga el refresh token: env var tiene prioridad, luego archivo persistido
+let refreshToken = process.env.GOOGLE_REFRESH_TOKEN || '';
+if (!refreshToken) {
+  try { refreshToken = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); } catch (_) {}
+}
+
+function saveRefreshToken(token) {
+  refreshToken = token;
+  try { fs.writeFileSync(TOKEN_FILE, token, 'utf8'); } catch (_) {}
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -171,9 +182,8 @@ http.createServer(async (req, res) => {
         redirect_uri: `${BASE_URL}/auth/callback`, grant_type: 'authorization_code'
       });
       if (tokens.refresh_token) {
-        refreshToken = tokens.refresh_token;
-        console.log('\n✅ Auth OK — agrega esta variable a Railway para persistir entre reinicios:');
-        console.log(`GOOGLE_REFRESH_TOKEN=${tokens.refresh_token}\n`);
+        saveRefreshToken(tokens.refresh_token);
+        console.log('\n✅ Auth OK — refresh token guardado en disco.\n');
       }
       res.writeHead(302, {
         ...secHeaders(),
@@ -217,6 +227,7 @@ http.createServer(async (req, res) => {
     if (refreshToken) {
       https.get(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(refreshToken)}`, () => {});
       refreshToken = '';
+      try { fs.unlinkSync(TOKEN_FILE); } catch (_) {}
     }
     res.writeHead(200, secHeaders({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
     res.end(JSON.stringify({ ok: true })); return;
