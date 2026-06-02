@@ -52,17 +52,41 @@ function yahooFetch(url, res) {
     let data = '';
     r.on('data', c => data += c);
     r.on('end', () => {
-      res.writeHead(r.statusCode || 200, {
+      res.writeHead(r.statusCode || 200, secHeaders({
         'Content-Type': 'application/json',
         'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'no-cache'
-      });
+      }));
       res.end(data);
     });
   }).on('error', (e) => {
-    res.writeHead(502, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(502, secHeaders({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
     res.end(JSON.stringify({ error: e.message }));
   });
+}
+
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' https://apis.google.com",
+  "style-src 'self' 'unsafe-inline'",
+  "connect-src 'self' https://*.googleapis.com https://accounts.google.com",
+  "img-src 'self' data: https:",
+  "frame-src https://accounts.google.com",
+  "font-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'"
+].join('; ');
+
+function secHeaders(extra = {}) {
+  return {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'SAMEORIGIN',
+    'Referrer-Policy': 'strict-origin-when-cross-origin',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    'Content-Security-Policy': CSP,
+    ...extra
+  };
 }
 
 http.createServer(async (req, res) => {
@@ -86,7 +110,7 @@ http.createServer(async (req, res) => {
       access_type: 'offline',
       prompt: 'consent'
     });
-    res.writeHead(302, { Location: `https://accounts.google.com/o/oauth2/v2/auth?${params}` });
+    res.writeHead(302, { ...secHeaders(), Location: `https://accounts.google.com/o/oauth2/v2/auth?${params}` });
     res.end(); return;
   }
 
@@ -95,7 +119,7 @@ http.createServer(async (req, res) => {
     const code  = url.searchParams.get('code');
     const error = url.searchParams.get('error');
     if (error || !code) {
-      res.writeHead(302, { Location: `/?auth_error=${encodeURIComponent(error || 'missing_code')}` });
+      res.writeHead(302, { ...secHeaders(), Location: `/?auth_error=${encodeURIComponent(error || 'missing_code')}` });
       res.end(); return;
     }
     try {
@@ -109,12 +133,13 @@ http.createServer(async (req, res) => {
         console.log(`GOOGLE_REFRESH_TOKEN=${tokens.refresh_token}\n`);
       }
       res.writeHead(302, {
+        ...secHeaders(),
         Location: `/?at=${encodeURIComponent(tokens.access_token)}&ei=${tokens.expires_in || 3600}`
       });
       res.end();
     } catch(e) {
       console.error('Auth callback error:', e.message);
-      res.writeHead(302, { Location: `/?auth_error=token_exchange_failed` });
+      res.writeHead(302, { ...secHeaders(), Location: `/?auth_error=token_exchange_failed` });
       res.end();
     }
     return;
@@ -123,7 +148,7 @@ http.createServer(async (req, res) => {
   // ── /auth/token ──────────────────────────────────────────
   if (url.pathname === '/auth/token') {
     if (!refreshToken) {
-      res.writeHead(401, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.writeHead(401, secHeaders({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
       res.end(JSON.stringify({ error: 'no_refresh_token' })); return;
     }
     try {
@@ -132,13 +157,13 @@ http.createServer(async (req, res) => {
         grant_type: 'refresh_token'
       });
       if (tokens.error) {
-        res.writeHead(401, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.writeHead(401, secHeaders({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
         res.end(JSON.stringify({ error: tokens.error })); return;
       }
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.writeHead(200, secHeaders({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
       res.end(JSON.stringify({ access_token: tokens.access_token, expires_in: tokens.expires_in || 3600 }));
     } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.writeHead(500, secHeaders({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
       res.end(JSON.stringify({ error: e.message }));
     }
     return;
@@ -150,7 +175,7 @@ http.createServer(async (req, res) => {
       https.get(`https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(refreshToken)}`, () => {});
       refreshToken = '';
     }
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(200, secHeaders({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }));
     res.end(JSON.stringify({ ok: true })); return;
   }
 
@@ -198,12 +223,12 @@ http.createServer(async (req, res) => {
     if (err) {
       fs.readFile(path.join(ROOT, 'index.html'), (e2, d2) => {
         if (e2) { res.writeHead(404); res.end('Not found'); return; }
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.writeHead(200, secHeaders({ 'Content-Type': 'text/html; charset=utf-8' }));
         res.end(d2);
       });
       return;
     }
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.writeHead(200, secHeaders({ 'Content-Type': MIME[ext] || 'application/octet-stream' }));
     res.end(data);
   });
 
