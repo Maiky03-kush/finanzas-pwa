@@ -84,7 +84,7 @@ http.createServer(async (req, res) => {
       response_type: 'code',
       scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
       access_type: 'offline',
-      prompt: 'consent'
+      prompt: refreshToken ? 'select_account' : 'consent'
     });
     res.writeHead(302, { Location: `https://accounts.google.com/o/oauth2/v2/auth?${params}` });
     res.end(); return;
