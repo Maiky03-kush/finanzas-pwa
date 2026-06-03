@@ -114,7 +114,7 @@ function yahooFetch(req, url, res) {
 
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://apis.google.com https://www.gstatic.com",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://apis.google.com https://www.gstatic.com https://content.googleapis.com https://*.googleapis.com",
   "style-src 'self' 'unsafe-inline'",
   "connect-src 'self' https://*.googleapis.com https://accounts.google.com https://www.gstatic.com",
   "img-src 'self' data: https:",
