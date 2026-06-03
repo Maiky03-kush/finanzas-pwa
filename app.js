@@ -35,6 +35,51 @@ let state = {
   }
 };
 
+/* ── Sheets API via fetch (bypass gapi.client que cuelga) ── */
+const SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
+function sheetsHeaders() {
+  return { 'Authorization': `Bearer ${state.accessToken}`, 'Content-Type': 'application/json' };
+}
+async function sheetsFetch(url, opts = {}) {
+  const resp = await fetch(url, { ...opts, headers: sheetsHeaders() });
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error?.message || resp.status); }
+  const result = await resp.json();
+  return { result };
+}
+const Sheets = {
+  spreadsheets: {
+    get: ({ spreadsheetId }) =>
+      sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}`),
+    create: ({ resource }) =>
+      sheetsFetch(`${SHEETS_BASE}`, { method: 'POST', body: JSON.stringify(resource) }),
+    batchUpdate: ({ spreadsheetId, resource }) =>
+      sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}:batchUpdate`, { method: 'POST', body: JSON.stringify(resource) }),
+    values: {
+      get: ({ spreadsheetId, range, valueRenderOption }) => {
+        const p = new URLSearchParams(valueRenderOption ? { valueRenderOption } : {});
+        return sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}/values/${encodeURIComponent(range)}?${p}`);
+      },
+      update: ({ spreadsheetId, range, valueInputOption, resource }) => {
+        const p = new URLSearchParams({ valueInputOption: valueInputOption || 'RAW' });
+        return sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}/values/${encodeURIComponent(range)}?${p}`, { method: 'PUT', body: JSON.stringify(resource) });
+      },
+      append: ({ spreadsheetId, range, valueInputOption, insertDataOption, resource }) => {
+        const p = new URLSearchParams({ valueInputOption: valueInputOption || 'RAW', ...(insertDataOption ? { insertDataOption } : {}) });
+        return sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}/values/${encodeURIComponent(range)}:append?${p}`, { method: 'POST', body: JSON.stringify(resource) });
+      },
+      batchGet: ({ spreadsheetId, ranges, valueRenderOption }) => {
+        const p = new URLSearchParams(valueRenderOption ? { valueRenderOption } : {});
+        (ranges || []).forEach(r => p.append('ranges', r));
+        return sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}/values:batchGet?${p}`);
+      },
+      batchUpdate: ({ spreadsheetId, resource }) =>
+        sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}/values:batchUpdate`, { method: 'POST', body: JSON.stringify(resource) }),
+      batchClear: ({ spreadsheetId, resource }) =>
+        sheetsFetch(`${SHEETS_BASE}/${spreadsheetId}/values:batchClear`, { method: 'POST', body: JSON.stringify(resource) }),
+    }
+  }
+};
+
 /* ── Service Worker ──────────────────────────────────────── */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
@@ -887,22 +932,10 @@ function updateSyncBadge(text, cls) {
 
 /* ── Google Auth ─────────────────────────────────────────── */
 function gapiLoaded() {
-  gapi.load('client', async () => {
-    try {
-      // setApiKey es síncrono — no bloquea la cola interna de GAPI
-      gapi.client.setApiKey(CONFIG.API_KEY);
-      // Cargar Sheets API directamente sin pasar por gapi.client.init()
-      // (init() intentaba inicializar auth2 internamente y colgaba)
-      await Promise.race([
-        gapi.client.load('https://sheets.googleapis.com/$discovery/rest?version=v4'),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('sheets load timeout')), 10000))
-      ]);
-    } catch(e) {
-      console.warn('GAPI setup:', e.message);
-    } finally {
-      state.gapiReady = true;
-      onGapiReady();
-    }
+  // GAPI solo se usa para setToken() — las llamadas a Sheets van por fetch() directo
+  gapi.load('client', () => {
+    state.gapiReady = true;
+    onGapiReady();
   });
 }
 function gisLoaded() {} // GIS ya no se usa para auth — mantenemos el callback vacío por compatibilidad
@@ -1043,16 +1076,14 @@ function updateAuthUI(connected) {
 /* ── Sheets bootstrap ────────────────────────────────────── */
 async function ensureSpreadsheet() {
   if (state.spreadsheetId) {
-    try { await gapi.client.sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId}); return; }
+    try { await Sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId}); return; }
     catch(e) { state.spreadsheetId = null; }
   }
-  const driveResp = await gapi.client.request({
-    path:'https://www.googleapis.com/drive/v3/files',
-    params:{ q:`name='${CONFIG.SHEET_NAME}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`, fields:'files(id,name)' }
-  });
+  const driveUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(`name='${CONFIG.SHEET_NAME}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`)}&fields=files(id,name)`;
+  const driveResp = await sheetsFetch(driveUrl);
   const files = driveResp.result.files || [];
   if (files.length > 0) { state.spreadsheetId = files[0].id; localStorage.setItem('finanzas_sheetId', state.spreadsheetId); return; }
-  const createResp = await gapi.client.sheets.spreadsheets.create({
+  const createResp = await Sheets.spreadsheets.create({
     resource:{ properties:{title:CONFIG.SHEET_NAME}, sheets:[
       {properties:{title:'Transacciones'}},{properties:{title:'Ahorro'}},
       {properties:{title:'Inversiones'}},{properties:{title:'Compras_Inv'}},
@@ -1062,7 +1093,7 @@ async function ensureSpreadsheet() {
   state.spreadsheetId = createResp.result.spreadsheetId;
   localStorage.setItem('finanzas_sheetId', state.spreadsheetId);
   // Write plain-text headers (RAW) for all sheets
-  await gapi.client.sheets.spreadsheets.values.batchUpdate({
+  await Sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: state.spreadsheetId,
     resource:{ valueInputOption:'RAW', data:[
       { range:'Transacciones!A1:G1', values:[['ID','Fecha','Tipo','Categoría','Descripción','Monto','Pago']] },
@@ -1077,7 +1108,7 @@ async function ensureSpreadsheet() {
   await ensurePreciosSheet();
   // Sheet-managed formulas for Inversiones (app never writes to J:P)
   try {
-    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+    await Sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: state.spreadsheetId,
       resource:{ valueInputOption:'USER_ENTERED', data:[
         { range:'Inversiones!J2', values:[['=ARRAYFORMULA(F2:F-E2:E)']] },
@@ -1095,14 +1126,14 @@ async function ensureSpreadsheet() {
 async function ensureSuscripcionesSheet() {
   if (!state.spreadsheetId) return;
   try {
-    const meta = await gapi.client.sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
+    const meta = await Sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
     const exists = meta.result.sheets.some(s=>s.properties.title==='Suscripciones');
     if (!exists) {
-      await gapi.client.sheets.spreadsheets.batchUpdate({
+      await Sheets.spreadsheets.batchUpdate({
         spreadsheetId:state.spreadsheetId,
         resource:{requests:[{addSheet:{properties:{title:'Suscripciones'}}}]}
       });
-      await gapi.client.sheets.spreadsheets.values.update({
+      await Sheets.spreadsheets.values.update({
         spreadsheetId:state.spreadsheetId, range:'Suscripciones!A1:H1',
         valueInputOption:'RAW', resource:{values:[['ID','Nombre','Monto','Moneda','Frecuencia','ProximoPago','Categoria','Notas']]}
       });
@@ -1113,14 +1144,14 @@ async function ensureSuscripcionesSheet() {
 async function ensureComprasInvSheet() {
   if (!state.spreadsheetId) return;
   try {
-    const meta = await gapi.client.sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
+    const meta = await Sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
     const exists = meta.result.sheets.some(s=>s.properties.title==='Compras_Inv');
     if (!exists) {
-      await gapi.client.sheets.spreadsheets.batchUpdate({
+      await Sheets.spreadsheets.batchUpdate({
         spreadsheetId:state.spreadsheetId,
         resource:{requests:[{addSheet:{properties:{title:'Compras_Inv'}}}]}
       });
-      await gapi.client.sheets.spreadsheets.values.update({
+      await Sheets.spreadsheets.values.update({
         spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A1:F1',
         valueInputOption:'RAW', resource:{values:[['ID','InvID','Fecha','Acciones','PrecioUSD','MontoCOP']]}
       });
@@ -1132,15 +1163,15 @@ async function ensureComprasInvSheet() {
 async function ensurePreciosSheet() {
   if (!state.spreadsheetId) return;
   try {
-    const meta = await gapi.client.sheets.spreadsheets.get({spreadsheetId: state.spreadsheetId});
+    const meta = await Sheets.spreadsheets.get({spreadsheetId: state.spreadsheetId});
     const exists = meta.result.sheets.some(s => s.properties.title === 'Precios');
     if (!exists) {
-      await gapi.client.sheets.spreadsheets.batchUpdate({
+      await Sheets.spreadsheets.batchUpdate({
         spreadsheetId: state.spreadsheetId,
         resource: { requests: [{ addSheet: { properties: { title: 'Precios' } } }] }
       });
     }
-    await gapi.client.sheets.spreadsheets.values.update({
+    await Sheets.spreadsheets.values.update({
       spreadsheetId: state.spreadsheetId, range: 'Precios!A1:C1',
       valueInputOption: 'RAW',
       resource: { values: [['Ticker', 'Precio USD (Yahoo Finance)', 'Actualizado']] }
@@ -1158,7 +1189,7 @@ async function syncPreciosTab() {
   if (!tickers.length) return;
   try {
     await ensurePreciosSheet();
-    await gapi.client.sheets.spreadsheets.values.batchClear({
+    await Sheets.spreadsheets.values.batchClear({
       spreadsheetId: state.spreadsheetId,
       resource: { ranges: ['Precios!A2:C'] }
     });
@@ -1168,7 +1199,7 @@ async function syncPreciosTab() {
       const price = inv?.marketPrice || inv?.purchasePrice || 0;
       return [t, price, now];
     });
-    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+    await Sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: state.spreadsheetId,
       resource: { valueInputOption: 'RAW', data: [
         { range: 'Precios!A2:C', values: rows }
@@ -1186,17 +1217,17 @@ async function migrateInversionesFormulas() {
   try {
     // Precios tab must exist before writing VLOOKUP formulas that reference it
     await ensurePreciosSheet();
-    await gapi.client.sheets.spreadsheets.values.batchClear({
+    await Sheets.spreadsheets.values.batchClear({
       spreadsheetId: state.spreadsheetId,
       resource: { ranges: ['Inversiones!J:N'] }
     });
-    await gapi.client.sheets.spreadsheets.values.update({
+    await Sheets.spreadsheets.values.update({
       spreadsheetId: state.spreadsheetId,
       range: 'Inversiones!J1:N1',
       valueInputOption: 'RAW',
       resource: { values: [['Ganancia $','Ganancia %','Precio GFIN $','Valor GFIN $','Δ App vs GFIN']] }
     });
-    await gapi.client.sheets.spreadsheets.values.batchUpdate({
+    await Sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: state.spreadsheetId,
       resource: { valueInputOption: 'USER_ENTERED', data: [
         { range: 'Inversiones!J2', values: [['=ARRAYFORMULA(F2:F-E2:E)']] },
@@ -1213,7 +1244,7 @@ async function migrateInversionesFormulas() {
         { range: 'Inversiones!P2', values: [['=ARRAYFORMULA(IF(A2:A="","",SUMIF(Compras_Inv!B:B,A2:A,Compras_Inv!D:D)))']] }
       ]}
     });
-    await gapi.client.sheets.spreadsheets.values.update({
+    await Sheets.spreadsheets.values.update({
       spreadsheetId: state.spreadsheetId,
       range: 'Inversiones!O1:P1',
       valueInputOption: 'RAW',
@@ -1225,15 +1256,15 @@ async function migrateInversionesFormulas() {
 async function ensureSnapshotsSheet() {
   if (!state.spreadsheetId) return;
   try {
-    const meta = await gapi.client.sheets.spreadsheets.get({ spreadsheetId: state.spreadsheetId });
+    const meta = await Sheets.spreadsheets.get({ spreadsheetId: state.spreadsheetId });
     const exists = meta.result.sheets.some(s => s.properties.title === 'Snapshots');
     if (!exists) {
-      await gapi.client.sheets.spreadsheets.batchUpdate({
+      await Sheets.spreadsheets.batchUpdate({
         spreadsheetId: state.spreadsheetId,
         resource: { requests: [{ addSheet: { properties: { title: 'Snapshots' } } }] }
       });
     }
-    await gapi.client.sheets.spreadsheets.values.update({
+    await Sheets.spreadsheets.values.update({
       spreadsheetId: state.spreadsheetId, range: 'Snapshots!A1:F1',
       valueInputOption: 'RAW',
       resource: { values: [['Mes','Portfolio USD','Invertido USD','Balance COP','Patrimonio COP','Timestamp']] }
@@ -1244,15 +1275,15 @@ async function ensureSnapshotsSheet() {
 async function ensurePresupuestoSheet() {
   if (!state.spreadsheetId) return;
   try {
-    const meta = await gapi.client.sheets.spreadsheets.get({ spreadsheetId: state.spreadsheetId });
+    const meta = await Sheets.spreadsheets.get({ spreadsheetId: state.spreadsheetId });
     const exists = meta.result.sheets.some(s => s.properties.title === 'Presupuesto');
     if (!exists) {
-      await gapi.client.sheets.spreadsheets.batchUpdate({
+      await Sheets.spreadsheets.batchUpdate({
         spreadsheetId: state.spreadsheetId,
         resource: { requests: [{ addSheet: { properties: { title: 'Presupuesto' } } }] }
       });
     }
-    await gapi.client.sheets.spreadsheets.values.update({
+    await Sheets.spreadsheets.values.update({
       spreadsheetId: state.spreadsheetId, range: 'Presupuesto!A1:C1',
       valueInputOption: 'RAW',
       resource: { values: [['ID', 'Categoría', 'LímiteMensual']] }
@@ -1262,7 +1293,7 @@ async function ensurePresupuestoSheet() {
 
 async function loadBudgets() {
   try {
-    const resp = await gapi.client.sheets.spreadsheets.values.get({
+    const resp = await Sheets.spreadsheets.values.get({
       spreadsheetId: state.spreadsheetId, range: 'Presupuesto!A2:C', valueRenderOption: 'UNFORMATTED_VALUE'
     });
     state.budgets = (resp.result.values || [])
@@ -1340,7 +1371,7 @@ async function saveMonthlySnapshot() {
 
   try {
     await ensureSnapshotsSheet();
-    await gapi.client.sheets.spreadsheets.values.append({
+    await Sheets.spreadsheets.values.append({
       spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2',
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
       resource: { values: [[snap.month, snap.portfolioUSD, snap.investedUSD, snap.balanceCOP, snap.patrimonioCOP, snap.ts]] }
@@ -1352,7 +1383,7 @@ async function loadSnapshots() {
   if (!state.spreadsheetId || !state.accessToken) return;
   try {
     await ensureSnapshotsSheet();
-    const resp = await gapi.client.sheets.spreadsheets.values.get({
+    const resp = await Sheets.spreadsheets.values.get({
       spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2:F', valueRenderOption: 'UNFORMATTED_VALUE'
     });
     const rows = resp.result.values || [];
@@ -1378,7 +1409,7 @@ async function syncFromSheets() {
     localStorage.setItem('finanzas_formulas_v5', '1');
   }
   try {
-    const resp = await gapi.client.sheets.spreadsheets.values.batchGet({
+    const resp = await Sheets.spreadsheets.values.batchGet({
       spreadsheetId: state.spreadsheetId,
       ranges:['Transacciones!A2:G','Ahorro!A2:F','Inversiones!A2:I'],
       valueRenderOption: 'UNFORMATTED_VALUE'
@@ -1414,7 +1445,7 @@ async function syncFromSheets() {
       return inv;
     }).filter(i=>i.name);
     try {
-      const purResp = await gapi.client.sheets.spreadsheets.values.get({
+      const purResp = await Sheets.spreadsheets.values.get({
         spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F', valueRenderOption:'UNFORMATTED_VALUE'
       });
       const repairedIds = new Set();
@@ -1455,7 +1486,7 @@ async function syncFromSheets() {
       }
     } catch(e) { await ensureComprasInvSheet(); }
     try {
-      const subResp = await gapi.client.sheets.spreadsheets.values.get({
+      const subResp = await Sheets.spreadsheets.values.get({
         spreadsheetId:state.spreadsheetId, range:'Suscripciones!A2:H', valueRenderOption:'UNFORMATTED_VALUE'
       });
       state.subscriptions = (subResp.result.values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', amount:Number(r[2])||0, currency:r[3]||'COP', frequency:r[4]||'monthly', nextPaymentDate:r[5]||'', category:r[6]||'Servicios', notes:r[7]||'' })).filter(s=>s.name);
@@ -1471,26 +1502,26 @@ async function syncFromSheets() {
 /* ── Sheets write helpers ────────────────────────────────── */
 async function appendRow(sheet, values) {
   if (!state.spreadsheetId || !state.accessToken) return;
-  await gapi.client.sheets.spreadsheets.values.append({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A1`, valueInputOption:'RAW', insertDataOption:'INSERT_ROWS', resource:{values:[values]} });
+  await Sheets.spreadsheets.values.append({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A1`, valueInputOption:'RAW', insertDataOption:'INSERT_ROWS', resource:{values:[values]} });
 }
 async function deleteRowById(sheet, id) {
   if (!state.spreadsheetId || !state.accessToken) return;
-  const resp = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A:A` });
+  const resp = await Sheets.spreadsheets.values.get({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A:A` });
   const rows = resp.result.values || [];
   const rowIndex = rows.findIndex(r=>r[0]===id);
   if (rowIndex < 1) return;
-  const meta = await gapi.client.sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
+  const meta = await Sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
   const sh = meta.result.sheets.find(s=>s.properties.title===sheet);
   if (!sh) return;
-  await gapi.client.sheets.spreadsheets.batchUpdate({ spreadsheetId:state.spreadsheetId, resource:{requests:[{deleteDimension:{range:{sheetId:sh.properties.sheetId,dimension:'ROWS',startIndex:rowIndex,endIndex:rowIndex+1}}}]} });
+  await Sheets.spreadsheets.batchUpdate({ spreadsheetId:state.spreadsheetId, resource:{requests:[{deleteDimension:{range:{sheetId:sh.properties.sheetId,dimension:'ROWS',startIndex:rowIndex,endIndex:rowIndex+1}}}]} });
 }
 async function updateRowById(sheet, id, values) {
   if (!state.spreadsheetId || !state.accessToken) return;
-  const resp = await gapi.client.sheets.spreadsheets.values.get({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A:A` });
+  const resp = await Sheets.spreadsheets.values.get({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A:A` });
   const rows = resp.result.values || [];
   const rowIndex = rows.findIndex(r=>r[0]===id);
   if (rowIndex < 1) return;
-  await gapi.client.sheets.spreadsheets.values.update({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A${rowIndex+1}`, valueInputOption:'RAW', resource:{values:[values]} });
+  await Sheets.spreadsheets.values.update({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A${rowIndex+1}`, valueInputOption:'RAW', resource:{values:[values]} });
 }
 
 /* ── CRUD: Transactions ──────────────────────────────────── */
