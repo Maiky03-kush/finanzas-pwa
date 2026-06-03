@@ -38,8 +38,8 @@ const CACHE_CONTROL = {
   'sw.js':         'no-store',                                      // SW siempre fresco
   '.html':         'no-cache',                                      // HTML siempre valida
   'manifest.json': 'no-cache',                                      // manifest siempre valida
-  '.css':          'public, max-age=3600, stale-while-revalidate=86400',
-  '.js':           'public, max-age=3600, stale-while-revalidate=86400',
+  '.css':          'no-cache',
+  '.js':           'no-cache',
   '.png':          'public, max-age=604800',                        // 7 días
   '.ico':          'public, max-age=604800',
   '.webp':         'public, max-age=604800',
