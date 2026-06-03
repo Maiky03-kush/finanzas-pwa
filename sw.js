@@ -1,4 +1,4 @@
-const CACHE = 'finanzas-v24';
+const CACHE = 'finanzas-v25';
 const ASSETS = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.json'];
 
 // Solo cachear recursos propios del dominio
