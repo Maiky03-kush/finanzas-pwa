@@ -889,12 +889,16 @@ function updateSyncBadge(text, cls) {
 function gapiLoaded() {
   gapi.load('client', async () => {
     try {
+      // setApiKey es síncrono — no bloquea la cola interna de GAPI
+      gapi.client.setApiKey(CONFIG.API_KEY);
+      // Cargar Sheets API directamente sin pasar por gapi.client.init()
+      // (init() intentaba inicializar auth2 internamente y colgaba)
       await Promise.race([
-        gapi.client.init({ apiKey: CONFIG.API_KEY, discoveryDocs: CONFIG.DISCOVERY_DOCS }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('gapi init timeout')), 8000))
+        gapi.client.load('https://sheets.googleapis.com/$discovery/rest?version=v4'),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('sheets load timeout')), 10000))
       ]);
     } catch(e) {
-      console.warn('GAPI init:', e.message);
+      console.warn('GAPI setup:', e.message);
     } finally {
       state.gapiReady = true;
       onGapiReady();
@@ -3254,7 +3258,8 @@ async function enableNotifications() {
     if (!dragging) return;
     const dy = e.touches[0].clientY - startY;
     if (dy <= 0) { dragging = false; return; }
-    e.preventDefault();
+    // Solo bloquear scroll nativo cuando el gesto es claramente PTR (>10px)
+    if (dy > 10) e.preventDefault();
     const pull = Math.min(dy, MAX_DRAG);
     const ind = getIndicator();
     ind.style.transform = `translateY(${pull - 56}px)`;
@@ -3273,7 +3278,7 @@ async function enableNotifications() {
     ind.style.transform = '';
     ind.style.opacity = '0';
     ind.classList.remove('ptr-ready');
-    if (!triggered || ptrActive || !state.token) return;
+    if (!triggered || ptrActive || !state.accessToken) return;
     ptrActive = true;
     ind.style.opacity = '1';
     ind.style.transform = 'translateY(0px)';
