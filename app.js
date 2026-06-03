@@ -888,7 +888,23 @@ function updateSyncBadge(text, cls) {
 /* ── Google Auth ─────────────────────────────────────────── */
 function gapiLoaded() {
   gapi.load('client', async () => {
-    await gapi.client.init({ apiKey: CONFIG.API_KEY, discoveryDocs: CONFIG.DISCOVERY_DOCS });
+    try {
+      // Race: init con 10s timeout para no colgar si discovery docs tardan
+      const initTimeout = new Promise((_, rej) => setTimeout(() => rej(new Error('init timeout')), 10000));
+      await Promise.race([
+        gapi.client.init({ apiKey: CONFIG.API_KEY, discoveryDocs: CONFIG.DISCOVERY_DOCS }),
+        initTimeout
+      ]);
+    } catch(e) {
+      console.warn('GAPI init error:', e.message, '— reintentando sin discovery docs');
+      try {
+        // Fallback: init sin discovery docs + carga explícita de Sheets
+        await gapi.client.init({ apiKey: CONFIG.API_KEY });
+        await gapi.client.load('https://sheets.googleapis.com/$discovery/rest?version=v4');
+      } catch(e2) {
+        console.warn('GAPI fallback error:', e2.message);
+      }
+    }
     state.gapiReady = true;
     onGapiReady();
   });
