@@ -1,4 +1,4 @@
-const CACHE = 'finanzas-v19';
+const CACHE = 'finanzas-v20';
 const ASSETS = ['index.html', 'styles.css', 'app.js', 'manifest.json'];
 
 self.addEventListener('install', e => {
