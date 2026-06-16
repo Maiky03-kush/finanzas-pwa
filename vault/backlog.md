@@ -1,7 +1,36 @@
 # Finanzas PWA — Backlog de Ingeniería
 
-**Actualizado**: 2026-05-16
+**Actualizado**: 2026-06-16
 **Metodología**: Prioridad por impacto en usuario real + deuda técnica acumulada
+
+---
+
+## PLAN DE MEJORA 30/60/90 DÍAS (Junio 2026)
+
+> Ver `vault/decisions/ADR-002-ui-design-system.md` para decisiones de diseño.
+
+### 30 días — UI Polish
+- [x] **P30-01**: Tipografía financiera monospaced + tabular nums (`font-variant-numeric`)
+- [x] **P30-02**: Microanimaciones Emil Kowalski en precios (ease-out 150ms, scale 1.02)
+- [x] **P30-03**: Investment cards con accent stripe P&L + Taste-Skill card design
+- [x] **P30-04**: Tooltips sin delay (150ms ease-out)
+- [x] **P30-05**: 8px spacing grid CSS variables
+- [ ] **P30-06**: Cards responsivas con Taste-Skill en modo tablet/desktop
+- [ ] **P30-07**: Tipografía base — revisar jerarquía en todas las vistas (dashboard, gastos)
+
+### 60 días — Funcionalidad
+- [ ] **P60-01**: Integrar LLM (Claude) para análisis automático del portfolio: alertas de variación, resumen diario
+- [ ] **P60-02**: Sistema de alertas push cuando inversión sube/baja X% (umbral configurable)
+- [ ] **P60-03**: Cache offline para datos históricos de Yahoo Finance
+- [ ] **P60-04**: Dashboard de rendimiento histórico con gráficas (canvas nativo)
+
+### 90 días — Inteligencia
+- [ ] **P90-01**: Resumen automático semanal del portfolio
+- [ ] **P90-02**: Detección de anomalías en portfolio
+- [ ] **P90-03**: Exportación PDF de reporte mensual
+- [ ] **P90-04**: Auditoría de seguridad OAuth GIS y Google Sheets scopes
+
+---
 
 ---
 

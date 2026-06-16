@@ -3085,7 +3085,7 @@ function investmentCard(inv) {
   const weight = totalCurUSD > 0 ? (currentUSD / totalCurUSD * 100) : 0;
 
   return `
-    <div class="inv-card">
+    <div class="inv-card ${pnlUSD>=0?'pnl-positive':'pnl-negative'}">
       <div class="inv-header">
         <div>
           <div class="inv-name">
@@ -3094,15 +3094,15 @@ function investmentCard(inv) {
           <div class="inv-type">${inv.type} · ${weight.toFixed(1)}% del portafolio${inv.shares?` · ${inv.shares} ${inv.type==='Criptomoneda'?'uds.':'acc.'}`:''}</div>
         </div>
         <div style="display:flex;gap:4px">
-          ${inv.ticker ? `<button class="action-btn alert-btn ${state.alerts.some(a=>a.invId===inv.id&&a.active&&!a.triggered)?'has-alert':''}" onclick="openAlertModal('${inv.id}')" title="Alertas de precio">🔔</button>` : ''}
-          <button class="action-btn" onclick="editInvestment('${inv.id}')">✏️</button>
-          <button class="action-btn danger" onclick="confirmDelete('inv','${inv.id}')">🗑️</button>
+          ${inv.ticker ? `<button class="action-btn alert-btn ${state.alerts.some(a=>a.invId===inv.id&&a.active&&!a.triggered)?'has-alert':''}" onclick="openAlertModal('${inv.id}')" title="Alertas de precio" data-tip="Configurar alertas">🔔</button>` : ''}
+          <button class="action-btn" onclick="editInvestment('${inv.id}')" data-tip="Editar">✏️</button>
+          <button class="action-btn danger" onclick="confirmDelete('inv','${inv.id}')" data-tip="Eliminar">🗑️</button>
         </div>
       </div>
 
       ${hasLive ? `
         <div class="live-price-row">
-          <span class="live-price">${fmtInv(inv.marketPrice)}</span>
+          <span class="live-price ${changeUp?'price-up':'price-down'}">${fmtInv(inv.marketPrice)}</span>
           <span class="live-change ${changeUp?'up':'down'}">
             ${changeUp?'▲':'▼'} ${Math.abs(inv.marketChangePct||0).toFixed(2)}%
             (${changeUp?'+':''}${fmtInv(inv.marketChange||0)})

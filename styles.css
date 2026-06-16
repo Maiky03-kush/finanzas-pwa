@@ -1048,6 +1048,202 @@ details > summary::-webkit-details-marker { display: none; }
 }
 .ph-del-btn:hover { opacity: 1; background: rgba(255,59,48,.1); }
 
+/* ══════════════════════════════════════════════════════════
+   UI POLISH — 30-DAY PHASE (Junio 2026)
+   Principios: Impeccable · Emil Kowalski · Taste-Skill
+   ══════════════════════════════════════════════════════════ */
+
+/* ─── 8px SPACING GRID ─── */
+:root {
+  --sp-1: 8px;
+  --sp-2: 16px;
+  --sp-3: 24px;
+  --sp-4: 32px;
+  --sp-6: 48px;
+  --shadow-card: 0 1px 4px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.06);
+  --shadow-card-hover: 0 4px 8px rgba(0,0,0,0.06), 0 8px 28px rgba(0,0,0,0.10);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --shadow-card: 0 1px 4px rgba(0,0,0,0.20), 0 4px 16px rgba(0,0,0,0.28);
+    --shadow-card-hover: 0 4px 8px rgba(0,0,0,0.30), 0 8px 28px rgba(0,0,0,0.45);
+  }
+}
+
+/* ─── FINANCIAL TYPOGRAPHY SYSTEM (Impeccable) ─── */
+/* Tabular nums: columnas de números perfectamente alineadas */
+.live-price,
+.balance-amount,
+.pnl-value,
+.pnl-amount,
+.savings-amounts,
+.inv-current,
+.patrimonio-value,
+.stat-value,
+.tx-amount,
+.balance-col-val,
+.month-net,
+.runway-number {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Ticker: monospaced + weight alto para legibilidad */
+.inv-ticker {
+  font-family: 'SF Mono', 'Roboto Mono', ui-monospace, 'Consolas', monospace;
+  letter-spacing: 0.04em;
+  font-weight: 800;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 5px;
+}
+
+/* ─── INVESTMENT CARD ENHANCEMENT (Taste-Skill) ─── */
+.inv-card {
+  box-shadow: var(--shadow-card);
+  border-radius: 18px;
+  transition: box-shadow 0.2s ease, transform 0.15s ease;
+  position: relative;
+  overflow: hidden;
+}
+.inv-card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
+}
+
+/* Accent stripe lateral basada en P&L */
+.inv-card.pnl-positive { border-left: 3px solid var(--green); }
+.inv-card.pnl-negative { border-left: 3px solid var(--red); }
+
+/* Separadores con opacidad (Taste-Skill: no harsh lines) */
+.pnl-row {
+  border-top-color: rgba(0,0,0,0.06);
+  border-bottom-color: rgba(0,0,0,0.06);
+}
+@media (prefers-color-scheme: dark) {
+  .pnl-row {
+    border-top-color: rgba(255,255,255,0.07);
+    border-bottom-color: rgba(255,255,255,0.07);
+  }
+}
+
+/* ─── PRICE FLASH ANIMATIONS (Emil Kowalski) ─── */
+/* ease-out para transiciones de estado — 150ms base, extendido para visibilidad */
+@keyframes priceFlashUp {
+  0%   { color: var(--green); transform: scale(1.025); }
+  35%  { color: var(--green); transform: scale(1.010); }
+  100% { transform: scale(1); }
+}
+@keyframes priceFlashDown {
+  0%   { color: var(--red);  transform: scale(1.025); }
+  35%  { color: var(--red);  transform: scale(1.010); }
+  100% { transform: scale(1); }
+}
+@keyframes cardAppear {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.live-price.price-up {
+  display: inline-block;
+  animation: priceFlashUp 550ms ease-out forwards;
+}
+.live-price.price-down {
+  display: inline-block;
+  animation: priceFlashDown 550ms ease-out forwards;
+}
+
+/* Stagger de entrada para cards (Taste-Skill: no aparecen todas a la vez) */
+.inv-card { animation: cardAppear 0.28s ease-out both; }
+.inv-card:nth-child(2) { animation-delay: 0.05s; }
+.inv-card:nth-child(3) { animation-delay: 0.10s; }
+.inv-card:nth-child(4) { animation-delay: 0.15s; }
+.inv-card:nth-child(5) { animation-delay: 0.20s; }
+.inv-card:nth-child(6) { animation-delay: 0.25s; }
+
+/* ─── LIVE PRICE ROW REFINEMENT ─── */
+.live-price {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  line-height: 1;
+}
+.live-change {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 8px;
+  letter-spacing: 0.02em;
+}
+
+/* ─── PnL ROW TYPOGRAPHY ─── */
+.pnl-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.pnl-value {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.2px;
+}
+
+/* ─── BALANCE CARD TYPOGRAPHY ─── */
+.balance-amount {
+  font-size: 42px;
+  font-weight: 800;
+  letter-spacing: -2px;
+  line-height: 1;
+}
+
+/* ─── TOOLTIP sin delay (Emil Kowalski) ─── */
+[data-tip] {
+  position: relative;
+}
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.80);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 10px;
+  border-radius: 7px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+  z-index: 500;
+}
+[data-tip]:hover::after { opacity: 1; }
+
+/* ─── MARKET INFO BAR REFINEMENT ─── */
+.market-info-bar {
+  border-radius: 14px;
+  gap: 12px;
+  font-size: 12px;
+}
+
+/* ─── SPARKLINE CONTAINER ─── */
+.sparkline-wrap {
+  border-radius: 10px;
+  margin: 8px 0 12px;
+}
+
+/* ─── SECTION TITLE HIERARCHY ─── */
+.section-title {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.3px;
+}
+
 /* ─── PULL TO REFRESH ─── */
 #ptr-indicator {
   position: fixed; top: 0; left: 0; right: 0; z-index: 9999;
