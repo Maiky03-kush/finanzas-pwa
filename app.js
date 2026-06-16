@@ -1800,7 +1800,7 @@ function recalcInvestment(invId) {
 function openModal(html) { document.getElementById('modal-content').innerHTML=html; document.getElementById('modal-overlay').classList.remove('hidden'); }
 function closeModal()    { document.getElementById('modal-overlay').classList.add('hidden'); }
 
-async function openAlertModal(invId) {
+async function openAlertModal(invId, prefill = null) {
   const inv = state.investments.find(i => i.id === invId);
   if (!inv) return;
   const invAlerts = state.alerts.filter(a => a.invId === invId);
@@ -1820,13 +1820,13 @@ async function openAlertModal(invId) {
         <div class="form-group">
           <label class="form-label">Condición</label>
           <select id="alert-condition" class="form-input">
-            <option value="above">▲ Sube sobre</option>
-            <option value="below">▼ Baja bajo</option>
+            <option value="above" ${prefill?.condition === 'above' ? 'selected' : ''}>▲ Sube sobre</option>
+            <option value="below" ${prefill?.condition === 'below' ? 'selected' : ''}>▼ Baja bajo</option>
           </select>
         </div>
         <div class="form-group">
           <label class="form-label">Precio target (USD)</label>
-          <input id="alert-price" type="number" step="0.01" min="0" class="form-input" placeholder="Ej: 180.00">
+          <input id="alert-price" type="number" step="0.01" min="0" class="form-input" placeholder="Ej: 180.00" value="${prefill?.targetPrice ?? ''}">
         </div>
         <button class="btn-primary" onclick="submitAlert('${invId}','${inv.ticker}')">Agregar alerta</button>
       </div>
@@ -1866,7 +1866,7 @@ function openAddModal() {
 
 /* ── Transaction Modal ───────────────────────────────────── */
 function openTransactionModal(tx) {
-  const editing = !!tx;
+  const editing = !!tx && !!tx.id;   // only editing when tx has an existing id
   const type = tx ? tx.type : state.addType;
   const cats = state.categories[type];
   openModal(`
@@ -2130,7 +2130,9 @@ function subscriptionCard(sub) {
 }
 
 /* ── Investment Modal (with ticker search) ───────────────── */
-function openInvestmentModal() {
+function openInvestmentModal(prefill = null) {
+  const prefillTicker = prefill?.ticker ?? '';
+  const prefillAmount = prefill?.amountUSD ?? '';
   openModal(`
     <div class="modal-header">
       <h2 class="modal-title">Nueva Inversión</h2>
@@ -2149,7 +2151,7 @@ function openInvestmentModal() {
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Ticker / Símbolo</label>
-          <input class="form-input" type="text" id="inv-ticker" placeholder="Ej: AAPL, BTC-USD" style="text-transform:uppercase">
+          <input class="form-input" type="text" id="inv-ticker" placeholder="Ej: AAPL, BTC-USD" style="text-transform:uppercase" value="${prefillTicker}">
         </div>
         <div class="form-group">
           <label class="form-label">Nombre</label>
@@ -2175,7 +2177,7 @@ function openInvestmentModal() {
         <div class="form-row">
           <div class="form-group" style="margin-bottom:8px">
             <label class="form-label">Monto invertido (USD)</label>
-            <input class="form-input" type="number" id="inv-amount" placeholder="Ej: 50.00" min="0" step="any" oninput="calcSharesFromAmount()" required>
+            <input class="form-input" type="number" id="inv-amount" placeholder="Ej: 50.00" min="0" step="any" oninput="calcSharesFromAmount()" required value="${prefillAmount}">
           </div>
           <div class="form-group" style="margin-bottom:8px">
             <label class="form-label">Precio de entrada (USD)</label>
@@ -3313,6 +3315,157 @@ async function enableNotifications() {
 }
 
 // Pull-to-refresh eliminado — el auto-refresh cada 60s lo cubre
+
+/* ════════════════════════════════════════════════════════════
+   VOICE COMMAND SYSTEM
+   Web Speech API → /api/parse-voice (Claude Haiku) → auto-fill modals
+   ════════════════════════════════════════════════════════════ */
+let _recognition = null;
+let _voiceActive = false;
+
+function toggleVoice() {
+  if (_voiceActive) { stopVoice(); return; }
+  startVoice();
+}
+
+function startVoice() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    showToast('Tu navegador no soporta entrada de voz. Usa Chrome o Edge.', 'warning', 4000);
+    return;
+  }
+
+  _voiceActive = true;
+  document.getElementById('voice-btn').classList.add('listening');
+  document.getElementById('voice-overlay').classList.remove('hidden');
+  setVoiceUI('listening', 'Escuchando…', '');
+
+  _recognition = new SpeechRecognition();
+  _recognition.lang = 'es-CO';
+  _recognition.interimResults = true;
+  _recognition.maxAlternatives = 1;
+
+  _recognition.onresult = e => {
+    const interim = Array.from(e.results).map(r => r[0].transcript).join('');
+    document.getElementById('voice-transcript').textContent = `"${interim}"`;
+  };
+
+  _recognition.onspeechend = () => _recognition.stop();
+
+  _recognition.onend = async () => {
+    const transcript = document.getElementById('voice-transcript').textContent.replace(/^"|"$/g, '').trim();
+    if (!transcript) { stopVoice(); return; }
+    setVoiceUI('processing', 'Procesando…', `"${transcript}"`);
+    await parseVoiceCommand(transcript);
+  };
+
+  _recognition.onerror = e => {
+    stopVoice();
+    if (e.error !== 'no-speech') showToast(`Error de micrófono: ${e.error}`, 'error', 3000);
+  };
+
+  _recognition.start();
+}
+
+function stopVoice() {
+  _voiceActive = false;
+  if (_recognition) { try { _recognition.abort(); } catch(e) {} _recognition = null; }
+  document.getElementById('voice-btn').classList.remove('listening');
+  document.getElementById('voice-overlay').classList.add('hidden');
+}
+
+function setVoiceUI(mode, status, transcript) {
+  const anim = document.getElementById('voice-anim');
+  anim.className = `voice-anim${mode === 'processing' ? ' processing' : ''}`;
+  document.getElementById('voice-status').textContent = status;
+  document.getElementById('voice-transcript').textContent = transcript;
+}
+
+async function parseVoiceCommand(transcript) {
+  try {
+    const r = await fetch('/api/parse-voice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: transcript })
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) throw new Error(data.error || 'Error del servidor');
+    stopVoice();
+    handleVoiceResult(data.result, transcript);
+  } catch(e) {
+    stopVoice();
+    showToast(`No se pudo interpretar: ${e.message}`, 'error', 4000);
+  }
+}
+
+function handleVoiceResult(result, transcript) {
+  switch(result.action) {
+    case 'transaction':
+      openVoiceTransactionModal(result);
+      break;
+    case 'investment':
+      openVoiceInvestmentModal(result);
+      break;
+    case 'alert':
+      openVoiceAlertModal(result);
+      break;
+    case 'query':
+      handleVoiceQuery(result);
+      break;
+    case 'unknown':
+    default:
+      showToast(result.suggestion || 'No entendí el comando. Intenta de nuevo.', 'warning', 4500);
+      break;
+  }
+}
+
+function openVoiceTransactionModal(r) {
+  const amtCOP = r.currency === 'USD'
+    ? Math.round(r.amount * (state.usdCopRate || 4200))
+    : r.amount;
+
+  // Update global type/payment state so the modal renders correctly
+  state.addType = r.type;
+  state.addPaymentMethod = r.paymentMethod || 'Efectivo';
+
+  showToast(`✅ Reconocido: ${r.type === 'Gasto' ? '📤' : '📥'} ${r.currency === 'COP' ? formatCOP(r.amount) : formatUSD(r.amount)} — ${r.description}`, 'success', 3000);
+
+  // Open transaction modal pre-filled (no id = new transaction)
+  openTransactionModal({
+    type: r.type,
+    category: r.category,
+    description: r.description,
+    amount: amtCOP,
+    paymentMethod: r.paymentMethod || 'Efectivo',
+    date: todayISO()
+  });
+}
+
+function openVoiceInvestmentModal(r) {
+  showToast(`📈 Reconocido: compra de ${r.ticker} — $${r.amountUSD} USD`, 'info', 4000);
+  openInvestmentModal({ ticker: r.ticker, amountUSD: r.amountUSD });
+}
+
+function openVoiceAlertModal(r) {
+  showToast(`🔔 Alerta para ${r.ticker}: ${r.condition === 'above' ? '▲ sobre' : '▼ bajo'} $${r.targetPrice}`, 'info', 4000);
+  // Find investment by ticker and open alert modal
+  const inv = state.investments.find(i => i.ticker && i.ticker.toUpperCase() === r.ticker.toUpperCase());
+  if (inv) {
+    openAlertModal(inv.id, { condition: r.condition, targetPrice: r.targetPrice });
+  } else {
+    showToast(`No tienes ${r.ticker} en tu portafolio. Agrégala primero.`, 'warning', 4000);
+  }
+}
+
+function handleVoiceQuery(r) {
+  if (r.subject === 'portfolio') {
+    navigate('investments');
+    showToast('Aquí está tu portafolio', 'info', 2500);
+  } else if (r.ticker) {
+    navigate('investments');
+    showToast(`Buscando ${r.ticker} en tu portafolio…`, 'info', 2500);
+  }
+}
 
 /* ── Boot ────────────────────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', () => {

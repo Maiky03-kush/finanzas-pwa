@@ -1323,6 +1323,84 @@ details > summary::-webkit-details-marker { display: none; }
 }
 .offline-banner span { flex: 1; }
 
+/* ─── VOICE FAB ─── */
+.voice-fab {
+  position: fixed;
+  right: 20px;
+  bottom: calc(var(--nav-h) + 16px + 56px + 14px);
+  width: 48px; height: 48px;
+  background: var(--card);
+  color: var(--text);
+  border: 1.5px solid var(--border);
+  border-radius: 24px;
+  font-size: 20px;
+  cursor: pointer;
+  z-index: 99;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.2s, transform 0.15s, box-shadow 0.2s;
+}
+.voice-fab:active { transform: scale(0.92); }
+.voice-fab.listening {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+  box-shadow: 0 0 0 6px rgba(255,59,48,0.2);
+  animation: voicePulse 1.2s ease-in-out infinite;
+}
+@keyframes voicePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,59,48,0.35); }
+  50%       { box-shadow: 0 0 0 10px rgba(255,59,48,0); }
+}
+
+/* ─── VOICE OVERLAY ─── */
+.voice-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45);
+  z-index: 500;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding-bottom: calc(var(--nav-h) + 80px);
+}
+.voice-overlay.hidden { display: none; }
+.voice-card {
+  background: var(--card);
+  border-radius: 24px;
+  padding: 28px 24px 22px;
+  width: calc(100% - 40px);
+  max-width: 380px;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.25);
+}
+.voice-anim {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: rgba(255,59,48,0.12);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 28px;
+  animation: voiceRingPulse 1.4s ease-in-out infinite;
+}
+.voice-anim::after { content: '🎤'; }
+@keyframes voiceRingPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,59,48,0.3); }
+  50%       { box-shadow: 0 0 0 16px rgba(255,59,48,0); }
+}
+.voice-anim.processing {
+  animation: voiceSpin 0.9s linear infinite;
+  background: rgba(0,122,255,0.12);
+}
+.voice-anim.processing::after { content: '⚙️'; }
+@keyframes voiceSpin {
+  to { transform: rotate(360deg); }
+}
+.voice-status {
+  font-size: 15px; font-weight: 600; color: var(--text);
+}
+.voice-transcript {
+  font-size: 13px; color: var(--muted); text-align: center;
+  min-height: 20px; line-height: 1.5;
+  padding: 0 8px;
+  font-style: italic;
+}
+
 /* ─── TOAST NOTIFICATIONS (in-app alerts & confirmations) ─── */
 .toast-container {
   position: fixed;

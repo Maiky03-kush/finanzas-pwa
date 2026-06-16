@@ -258,6 +258,79 @@ http.createServer(async (req, res) => {
     return;
   }
 
+  // ── /api/parse-voice  (Claude Haiku NLP) ────────────────
+  if (url.pathname === '/api/parse-voice' && req.method === 'POST') {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      res.writeHead(503, secHeaders({ 'Content-Type': 'application/json' }));
+      res.end(JSON.stringify({ error: 'ANTHROPIC_API_KEY no configurada en Railway' }));
+      return;
+    }
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', async () => {
+      try {
+        const { text } = JSON.parse(body);
+        if (!text || typeof text !== 'string') throw new Error('Texto requerido');
+
+        const systemPrompt = `Eres el asistente de una app personal de finanzas colombiana. Parsea el comando de voz del usuario y responde SOLO con JSON válido, sin explicación.
+
+Categorías de gastos (usa exactamente estas):
+Alimentación, Transporte, Entretenimiento, Salud, Educación, Vivienda, Servicios, Ropa, Tecnología, Restaurante, Supermercado, Deporte, Mascotas, Otro
+
+Reglas de monto:
+- "X mil" → X*1000, "X millones"/"X palos" → X*1000000
+- "X dólares"/"X USD" → currency:"USD", default:"COP"
+- Escribe el número sin separadores: "doce mil quinientos" → 12500
+
+Schemas de respuesta:
+
+Transacción: {"action":"transaction","type":"Gasto"|"Ingreso","amount":number,"currency":"COP"|"USD","description":"string","category":"string","paymentMethod":"Efectivo"|"Tarjeta"}
+
+Compra de inversión: {"action":"investment","subaction":"buy","ticker":"SYMBOL","amountUSD":number,"description":"string"}
+
+Alerta de precio: {"action":"alert","ticker":"SYMBOL","condition":"above"|"below","targetPrice":number}
+
+Consulta portafolio: {"action":"query","subject":"portfolio"|"ticker","ticker":"SYMBOL_o_null"}
+
+No entendido: {"action":"unknown","suggestion":"pide al usuario que aclare en español"}
+
+Ejemplos:
+"gasté 12500 en efectivo en desayuno" → {"action":"transaction","type":"Gasto","amount":12500,"currency":"COP","description":"desayuno","category":"Alimentación","paymentMethod":"Efectivo"}
+"me pagaron el salario 3 millones" → {"action":"transaction","type":"Ingreso","amount":3000000,"currency":"COP","description":"salario","category":"Otro","paymentMethod":"Efectivo"}
+"invertí 100 dólares en apple" → {"action":"investment","subaction":"buy","ticker":"AAPL","amountUSD":100,"description":"Apple"}
+"pon alerta si tesla baja de 200" → {"action":"alert","ticker":"TSLA","condition":"below","targetPrice":200}
+"cuánto llevo en inversiones" → {"action":"query","subject":"portfolio","ticker":null}`;
+
+        const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 256,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: text }]
+          })
+        });
+
+        const claudeData = await claudeRes.json();
+        if (claudeData.error) throw new Error(claudeData.error.message);
+        const parsed = JSON.parse(claudeData.content[0].text.trim());
+
+        res.writeHead(200, secHeaders({ 'Content-Type': 'application/json' }));
+        res.end(JSON.stringify({ ok: true, result: parsed, transcript: text }));
+      } catch(e) {
+        res.writeHead(500, secHeaders({ 'Content-Type': 'application/json' }));
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+    return;
+  }
+
   // ── Static files ─────────────────────────────────────────
   let urlPath = url.pathname;
   if (urlPath === '/') urlPath = '/index.html';

@@ -52,6 +52,19 @@
   <!-- MAIN CONTENT -->
   <main id="app-content" class="app-main"></main>
 
+  <!-- VOICE BUTTON -->
+  <button id="voice-btn" class="voice-fab" onclick="toggleVoice()" title="Entrada por voz">🎤</button>
+
+  <!-- VOICE OVERLAY -->
+  <div id="voice-overlay" class="voice-overlay hidden">
+    <div class="voice-card">
+      <div id="voice-anim" class="voice-anim"></div>
+      <div id="voice-status" class="voice-status">Escuchando…</div>
+      <div id="voice-transcript" class="voice-transcript"></div>
+      <button class="btn-ghost btn-sm" onclick="stopVoice()">Cancelar</button>
+    </div>
+  </div>
+
   <!-- FAB -->
   <button class="fab" onclick="openAddModal()" title="Agregar transacción">+</button>
 
