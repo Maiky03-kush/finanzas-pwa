@@ -144,15 +144,32 @@ function saveLocal() {
   idbSet('subscriptions', state.subscriptions);
   idbSet('categories',    state.categories);
   idbSet('budgets',       state.budgets);
+
+  // Persist market prices separately so they survive reloads (offline-first)
+  if (state.pricesLastUpdated) {
+    const prices = {};
+    state.investments.forEach(inv => {
+      if (inv.marketPrice != null) {
+        prices[inv.id] = {
+          marketPrice: inv.marketPrice, marketChange: inv.marketChange,
+          marketChangePct: inv.marketChangePct, marketCurrency: inv.marketCurrency,
+          marketName: inv.marketName, marketExchange: inv.marketExchange
+        };
+      }
+    });
+    idbSet('marketPrices', prices);
+    idbSet('pricesLastUpdated', state.pricesLastUpdated.toISOString());
+  }
 }
 
 async function loadLocal() {
   try {
-    const [idbInv, idbTx, idbSav, idbPur, idbSheetId, idbAlerts, idbSnaps, idbSubs, idbCats, idbBudgets] = await Promise.all([
+    const [idbInv, idbTx, idbSav, idbPur, idbSheetId, idbAlerts, idbSnaps, idbSubs, idbCats, idbBudgets, idbPrices, idbPriceTs] = await Promise.all([
       idbGet('investments'), idbGet('transactions'), idbGet('savings'),
       idbGet('purchases'),   idbGet('sheetId'),
       idbGet('alerts'),      idbGet('snapshots'),
-      idbGet('subscriptions'), idbGet('categories'), idbGet('budgets')
+      idbGet('subscriptions'), idbGet('categories'), idbGet('budgets'),
+      idbGet('marketPrices'), idbGet('pricesLastUpdated')
     ]);
     state.transactions        = idbTx      || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
     state.savings             = idbSav     || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
@@ -165,6 +182,15 @@ async function loadLocal() {
     state.spreadsheetId       = idbSheetId || localStorage.getItem('finanzas_sheetId') || null;
     const savedCats = idbCats || JSON.parse(localStorage.getItem('finanzas_categories') || 'null');
     if (savedCats) state.categories = savedCats;
+
+    // Restore last-known market prices (offline-first: show stale data until refresh)
+    if (idbPrices) {
+      state.investments.forEach(inv => {
+        const p = idbPrices[inv.id];
+        if (p) Object.assign(inv, p);
+      });
+    }
+    if (idbPriceTs) state.pricesLastUpdated = new Date(idbPriceTs);
   } catch(e) {
     state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = []; state.budgets = [];
   }
@@ -821,6 +847,26 @@ function fireNotification(title, body, tag) {
   showNotif(title, body, tag);
 }
 
+// ── In-app toast (visible while user is in the app) ───────
+function showToast(message, type = 'info', duration = 3200) {
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+  const icons = { success: '✅', warning: '⚠️', error: '❌', info: 'ℹ️', alert: '🔔' };
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `<span>${icons[type] || icons.info}</span><span class="toast-msg">${message}</span><button class="toast-close" onclick="this.parentElement.remove()">✕</button>`;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('toast-exit');
+    toast.addEventListener('animationend', () => toast.remove(), { once: true });
+  }, duration);
+}
+
 function addAlert(alert) {
   alert.id = uid();
   alert.triggered = false;
@@ -858,6 +904,7 @@ function checkAlerts() {
       `Precio actual: ${formatUSD(price)}`,
       `alert_${alert.id}`
     );
+    showToast(`🔔 <strong>${alert.ticker}</strong> ${dir} ${formatUSD(alert.targetPrice)} — hoy: ${formatUSD(price)}`, 'alert', 6000);
   }
   if (changed) {
     saveLocal();
@@ -2994,9 +3041,14 @@ function renderInvestments() {
         <button class="section-link" onclick="openInvestmentModal()">+ Nueva</button>
       </div>
 
+      ${!navigator.onLine && state.pricesLastUpdated ? `
+        <div class="offline-banner">
+          <span>📡 Sin conexión — mostrando precios de ${state.pricesLastUpdated.toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'})}</span>
+        </div>` : ''}
+
       ${state.investments.length===0
         ?`<p class="empty-state">Sin inversiones.<br>Toca + para agregar. Puedes buscar cualquier acción de NYSE, NASDAQ y más.</p>`
-        :state.investments.map(investmentCard).join('')}
+        :`<div class="inv-grid">${state.investments.map(investmentCard).join('')}</div>`}
     </div>`;
 
   // Load sparklines async after DOM is ready (only for investments with live price)
@@ -3152,6 +3204,8 @@ async function manualRefreshPrices() {
   if (bar) bar.textContent = 'Actualizando…';
   await refreshInvestmentPrices();
   if (state.view==='investments') renderView();
+  const count = state.investments.filter(i => i.ticker && i.marketPrice != null).length;
+  if (count > 0) showToast(`Precios actualizados (${count} activos)`, 'success', 2500);
 }
 
 /* ════════════════════════════════════════════════════════════

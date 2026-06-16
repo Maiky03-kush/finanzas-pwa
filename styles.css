@@ -1244,6 +1244,133 @@ details > summary::-webkit-details-marker { display: none; }
   letter-spacing: -0.3px;
 }
 
+/* ─── P30-06: RESPONSIVE INVESTMENT GRID (Taste-Skill tablet/desktop) ─── */
+.inv-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+
+@media (min-width: 768px) {
+  .app-main { max-width: 960px; }
+
+  .inv-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 14px;
+  }
+  .inv-grid .inv-card {
+    margin-bottom: 0;
+    /* re-apply stagger for 2-col layout */
+  }
+  .inv-grid .inv-card:nth-child(odd)  { animation-delay: 0.00s; }
+  .inv-grid .inv-card:nth-child(even) { animation-delay: 0.06s; }
+}
+
+@media (min-width: 1200px) {
+  .app-main { max-width: 1140px; }
+  .inv-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* ─── P30-07: TABULAR NUMS EN TODAS LAS VISTAS (Impeccable) ─── */
+/* Dashboard summary table */
+.summary-table td,
+.summary-table th {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+.col-income,
+.col-expense {
+  font-weight: 700;
+  letter-spacing: -0.1px;
+}
+
+/* Transaction totals */
+.tx-tab-total,
+.month-total,
+.tx-summary-bar strong {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: -0.2px;
+}
+
+/* Savings amounts */
+.savings-amounts,
+.savings-current {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Projection */
+.proj-value,
+.runway-number {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* ─── OFFLINE BANNER ─── */
+.offline-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(255,149,0,0.12);
+  border: 1px solid rgba(255,149,0,0.35);
+  border-radius: 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--orange);
+  font-weight: 500;
+}
+.offline-banner span { flex: 1; }
+
+/* ─── TOAST NOTIFICATIONS (in-app alerts & confirmations) ─── */
+.toast-container {
+  position: fixed;
+  top: calc(var(--header-h) + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  pointer-events: none;
+  width: calc(100% - 32px);
+  max-width: 420px;
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(-10px) scale(0.96); }
+  to   { opacity: 1; transform: translateY(0)     scale(1); }
+}
+@keyframes toastOut {
+  from { opacity: 1; transform: translateY(0)     scale(1); }
+  to   { opacity: 0; transform: translateY(-6px)  scale(0.95); }
+}
+.toast {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 11px 14px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.15), 0 1px 4px rgba(0,0,0,0.08);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  animation: toastIn 0.22s ease-out forwards;
+  pointer-events: auto;
+  width: 100%;
+}
+.toast.toast-exit    { animation: toastOut 0.22s ease-out forwards; }
+.toast.toast-success { border-left: 3px solid var(--green); }
+.toast.toast-warning { border-left: 3px solid var(--orange); }
+.toast.toast-error   { border-left: 3px solid var(--red); }
+.toast.toast-info    { border-left: 3px solid var(--blue); }
+.toast.toast-alert   { border-left: 3px solid var(--purple); }
+.toast-msg  { flex: 1; line-height: 1.4; }
+.toast-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 15px; padding: 0 2px; flex-shrink: 0; }
+
 /* ─── PULL TO REFRESH ─── */
 #ptr-indicator {
   position: fixed; top: 0; left: 0; right: 0; z-index: 9999;
