@@ -7,8 +7,8 @@
 **Finanzas PWA** es una Progressive Web App personal de gestión financiera que usa Google Sheets como backend/base de datos y Google OAuth para autenticación. Permite rastrear inversiones con precios en vivo vía Yahoo Finance, gestionar lotes de compra, y visualizar ganancias en tiempo real.
 
 **Creado**: 2026
-**Última sesión**: 2026-05-16
-**Último commit**: 4391eb3
+**Última sesión**: 2026-06-16
+**Último commit**: (ver git log)
 
 ## Estado Actual
 
@@ -80,8 +80,14 @@
 - **Rama principal**: master
 - **Deploy**: push a master → Railway auto-deploy
 
-## Pendientes Activos (post sesión 2026-05-16)
+## Pendientes Activos (post sesión 2026-06-16)
 
+### Plan de Mejora 30/60/90 días — en ejecución
+- [x] **UI-01** — 30-day UI Polish: tipografía financiera (tabular nums), microanimaciones (Emil Kowalski), card design (Taste-Skill) → `ADR-002-ui-design-system.md`
+- [ ] **UI-02** — Completar P30-06 y P30-07 (cards tablet + tipografía base en todas las vistas)
+- [ ] **UI-03** — Iniciar 60-day: integración LLM + alertas push
+
+### Pendientes Pre-Plan (de sesión 2026-05-16)
 - [ ] **A** — Verificar auto-repair en dispositivo real: sync v6 debe corregir shares y escribir al sheet
 - [ ] **B** — SCHD y ETH-USD tienen invested=0 → usuario debe abrir ✏️ en cada lote y registrar monto
 - [ ] **C** — Fórmulas J/K muestran 0 en filas vacías (estético) → resolver con formato condicional en sheet

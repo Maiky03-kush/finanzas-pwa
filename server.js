@@ -5,6 +5,7 @@ const path  = require('path');
 const zlib  = require('zlib');
 
 const PORT          = process.env.PORT || 3000;
+const voiceRateLimit = new Map(); // ip → { count, resetAt }
 const ROOT          = __dirname;
 const CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || '';
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -255,6 +256,103 @@ http.createServer(async (req, res) => {
     const q = url.searchParams.get('q');
     if (!q) { res.writeHead(400); res.end('Missing q'); return; }
     yahooFetch(req, `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=8&newsCount=0&listsCount=0`, res);
+    return;
+  }
+
+  // ── /api/parse-voice  (Claude Haiku NLP) ────────────────
+  if (url.pathname === '/api/parse-voice' && req.method === 'POST') {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      res.writeHead(503, secHeaders({ 'Content-Type': 'application/json' }));
+      res.end(JSON.stringify({ error: 'ANTHROPIC_API_KEY no configurada en Railway' }));
+      return;
+    }
+
+    // Rate limiting: 15 requests/min per IP (prevents API cost abuse)
+    const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const rl = voiceRateLimit.get(ip) || { count: 0, resetAt: now + 60000 };
+    if (now > rl.resetAt) { rl.count = 0; rl.resetAt = now + 60000; }
+    rl.count++;
+    voiceRateLimit.set(ip, rl);
+    if (rl.count > 15) {
+      res.writeHead(429, secHeaders({ 'Content-Type': 'application/json' }));
+      res.end(JSON.stringify({ error: 'Demasiadas solicitudes. Espera un minuto.' }));
+      return;
+    }
+
+    let body = '';
+    let bodyBytes = 0;
+    req.on('data', c => {
+      bodyBytes += c.length;
+      if (bodyBytes > 65536) { req.destroy(); return; } // 64 KB cap
+      body += c;
+    });
+    req.on('end', async () => {
+      try {
+        const { text } = JSON.parse(body);
+        if (!text || typeof text !== 'string') throw new Error('Texto requerido');
+        const safeText = text.slice(0, 500); // max 500 chars → bounded token cost
+
+        const systemPrompt = `Eres el asistente de una app personal de finanzas colombiana. Parsea el comando de voz del usuario y responde SOLO con JSON válido, sin explicación.
+
+Categorías de Gasto (usa exactamente estas, sin variaciones):
+Vehículo, SimRacing, Alimentación, Transporte, Servicios, Entretenimiento, Salud, Educación, Hogar, Otros
+
+Categorías de Ingreso (usa exactamente estas):
+Salario, Freelance, Inversiones, Arriendos, Bonos, Otros
+
+Reglas de monto:
+- "X mil" → X*1000, "X millones"/"X palos" → X*1000000
+- "X dólares"/"X USD" → currency:"USD", default:"COP"
+- Escribe el número sin separadores: "doce mil quinientos" → 12500
+
+Schemas de respuesta:
+
+Transacción: {"action":"transaction","type":"Gasto"|"Ingreso","amount":number,"currency":"COP"|"USD","description":"string","category":"string","paymentMethod":"Efectivo"|"Tarjeta"}
+
+Compra de inversión: {"action":"investment","subaction":"buy","ticker":"SYMBOL","amountUSD":number,"description":"string"}
+
+Alerta de precio: {"action":"alert","ticker":"SYMBOL","condition":"above"|"below","targetPrice":number}
+
+Consulta portafolio: {"action":"query","subject":"portfolio"|"ticker","ticker":"SYMBOL_o_null"}
+
+No entendido: {"action":"unknown","suggestion":"pide al usuario que aclare en español"}
+
+Ejemplos:
+"gasté 12500 en efectivo en desayuno" → {"action":"transaction","type":"Gasto","amount":12500,"currency":"COP","description":"desayuno","category":"Alimentación","paymentMethod":"Efectivo"}
+"me pagaron el salario 3 millones" → {"action":"transaction","type":"Ingreso","amount":3000000,"currency":"COP","description":"salario","category":"Salario","paymentMethod":"Efectivo"}
+"invertí 100 dólares en apple" → {"action":"investment","subaction":"buy","ticker":"AAPL","amountUSD":100,"description":"Apple"}
+"pon alerta si tesla baja de 200" → {"action":"alert","ticker":"TSLA","condition":"below","targetPrice":200}
+"cuánto llevo en inversiones" → {"action":"query","subject":"portfolio","ticker":null}`;
+
+        const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01'
+          },
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 256,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: safeText }]
+          })
+        });
+
+        const claudeData = await claudeRes.json();
+        if (!claudeRes.ok || claudeData.error) throw new Error(claudeData.error?.message || `Claude ${claudeRes.status}`);
+        if (!claudeData.content?.[0]?.text) throw new Error('Respuesta inesperada de Claude');
+        const parsed = JSON.parse(claudeData.content[0].text.trim());
+
+        res.writeHead(200, secHeaders({ 'Content-Type': 'application/json' }));
+        res.end(JSON.stringify({ ok: true, result: parsed, transcript: safeText }));
+      } catch(e) {
+        res.writeHead(500, secHeaders({ 'Content-Type': 'application/json' }));
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
     return;
   }
 
