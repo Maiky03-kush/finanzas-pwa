@@ -863,7 +863,9 @@ function showToast(message, type = 'info', duration = 3200) {
   container.appendChild(toast);
   setTimeout(() => {
     toast.classList.add('toast-exit');
-    toast.addEventListener('animationend', () => toast.remove(), { once: true });
+    const remove = () => { if (toast.parentElement) toast.remove(); };
+    toast.addEventListener('animationend', remove, { once: true });
+    setTimeout(remove, 600); // fallback if animationend never fires
   }, duration);
 }
 
@@ -1912,7 +1914,14 @@ function openTransactionModal(tx) {
       <button type="submit" class="btn-primary">${editing?'Guardar cambios':'Agregar'}</button>
     </form>`);
 }
-function switchModalType(type) { state.addType=type; state.addPaymentMethod='Efectivo'; openTransactionModal(); }
+function switchModalType(type) {
+  const desc = document.getElementById('tx-desc')?.value ?? '';
+  const amt  = document.getElementById('tx-amount')?.value ?? '';
+  const date = document.getElementById('tx-date')?.value ?? todayISO();
+  state.addType = type;
+  state.addPaymentMethod = 'Efectivo';
+  openTransactionModal(desc || amt ? { type, description: desc, amount: parseFloat(amt) || undefined, date } : null);
+}
 function handleCatChange(sel) {
   const custom = document.getElementById('tx-cat-custom');
   if (custom) custom.style.display = sel.value==='__nueva__' ? 'block' : 'none';
@@ -3325,10 +3334,18 @@ let _voiceActive = false;
 
 function toggleVoice() {
   if (_voiceActive) { stopVoice(); return; }
+  if (!document.getElementById('modal-overlay').classList.contains('hidden')) {
+    showToast('Cierra el formulario antes de usar la voz.', 'info', 2500);
+    return;
+  }
   startVoice();
 }
 
 function startVoice() {
+  if (!navigator.onLine) {
+    showToast('La voz requiere conexión a internet.', 'warning', 3500);
+    return;
+  }
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     showToast('Tu navegador no soporta entrada de voz. Usa Chrome o Edge.', 'warning', 4000);
@@ -3353,6 +3370,7 @@ function startVoice() {
   _recognition.onspeechend = () => _recognition.stop();
 
   _recognition.onend = async () => {
+    if (!_voiceActive) return; // onerror or stopVoice already handled this session
     const transcript = document.getElementById('voice-transcript').textContent.replace(/^"|"$/g, '').trim();
     if (!transcript) { stopVoice(); return; }
     setVoiceUI('processing', 'Procesando…', `"${transcript}"`);
@@ -3476,4 +3494,7 @@ window.addEventListener('DOMContentLoaded', () => {
       checkSubscriptionNotifications();
     }
   });
+  // Re-render on connectivity change so offline banner appears/disappears reactively
+  window.addEventListener('online',  () => renderView());
+  window.addEventListener('offline', () => renderView());
 });

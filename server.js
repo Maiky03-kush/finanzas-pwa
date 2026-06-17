@@ -5,6 +5,7 @@ const path  = require('path');
 const zlib  = require('zlib');
 
 const PORT          = process.env.PORT || 3000;
+const voiceRateLimit = new Map(); // ip → { count, resetAt }
 const ROOT          = __dirname;
 const CLIENT_ID     = process.env.GOOGLE_CLIENT_ID     || '';
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -266,17 +267,40 @@ http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'ANTHROPIC_API_KEY no configurada en Railway' }));
       return;
     }
+
+    // Rate limiting: 15 requests/min per IP (prevents API cost abuse)
+    const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const rl = voiceRateLimit.get(ip) || { count: 0, resetAt: now + 60000 };
+    if (now > rl.resetAt) { rl.count = 0; rl.resetAt = now + 60000; }
+    rl.count++;
+    voiceRateLimit.set(ip, rl);
+    if (rl.count > 15) {
+      res.writeHead(429, secHeaders({ 'Content-Type': 'application/json' }));
+      res.end(JSON.stringify({ error: 'Demasiadas solicitudes. Espera un minuto.' }));
+      return;
+    }
+
     let body = '';
-    req.on('data', c => body += c);
+    let bodyBytes = 0;
+    req.on('data', c => {
+      bodyBytes += c.length;
+      if (bodyBytes > 65536) { req.destroy(); return; } // 64 KB cap
+      body += c;
+    });
     req.on('end', async () => {
       try {
         const { text } = JSON.parse(body);
         if (!text || typeof text !== 'string') throw new Error('Texto requerido');
+        const safeText = text.slice(0, 500); // max 500 chars → bounded token cost
 
         const systemPrompt = `Eres el asistente de una app personal de finanzas colombiana. Parsea el comando de voz del usuario y responde SOLO con JSON válido, sin explicación.
 
-Categorías de gastos (usa exactamente estas):
-Alimentación, Transporte, Entretenimiento, Salud, Educación, Vivienda, Servicios, Ropa, Tecnología, Restaurante, Supermercado, Deporte, Mascotas, Otro
+Categorías de Gasto (usa exactamente estas, sin variaciones):
+Vehículo, SimRacing, Alimentación, Transporte, Servicios, Entretenimiento, Salud, Educación, Hogar, Otros
+
+Categorías de Ingreso (usa exactamente estas):
+Salario, Freelance, Inversiones, Arriendos, Bonos, Otros
 
 Reglas de monto:
 - "X mil" → X*1000, "X millones"/"X palos" → X*1000000
@@ -297,7 +321,7 @@ No entendido: {"action":"unknown","suggestion":"pide al usuario que aclare en es
 
 Ejemplos:
 "gasté 12500 en efectivo en desayuno" → {"action":"transaction","type":"Gasto","amount":12500,"currency":"COP","description":"desayuno","category":"Alimentación","paymentMethod":"Efectivo"}
-"me pagaron el salario 3 millones" → {"action":"transaction","type":"Ingreso","amount":3000000,"currency":"COP","description":"salario","category":"Otro","paymentMethod":"Efectivo"}
+"me pagaron el salario 3 millones" → {"action":"transaction","type":"Ingreso","amount":3000000,"currency":"COP","description":"salario","category":"Salario","paymentMethod":"Efectivo"}
 "invertí 100 dólares en apple" → {"action":"investment","subaction":"buy","ticker":"AAPL","amountUSD":100,"description":"Apple"}
 "pon alerta si tesla baja de 200" → {"action":"alert","ticker":"TSLA","condition":"below","targetPrice":200}
 "cuánto llevo en inversiones" → {"action":"query","subject":"portfolio","ticker":null}`;
@@ -313,16 +337,17 @@ Ejemplos:
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 256,
             system: systemPrompt,
-            messages: [{ role: 'user', content: text }]
+            messages: [{ role: 'user', content: safeText }]
           })
         });
 
         const claudeData = await claudeRes.json();
-        if (claudeData.error) throw new Error(claudeData.error.message);
+        if (!claudeRes.ok || claudeData.error) throw new Error(claudeData.error?.message || `Claude ${claudeRes.status}`);
+        if (!claudeData.content?.[0]?.text) throw new Error('Respuesta inesperada de Claude');
         const parsed = JSON.parse(claudeData.content[0].text.trim());
 
         res.writeHead(200, secHeaders({ 'Content-Type': 'application/json' }));
-        res.end(JSON.stringify({ ok: true, result: parsed, transcript: text }));
+        res.end(JSON.stringify({ ok: true, result: parsed, transcript: safeText }));
       } catch(e) {
         res.writeHead(500, secHeaders({ 'Content-Type': 'application/json' }));
         res.end(JSON.stringify({ error: e.message }));
