@@ -29,6 +29,10 @@ let state = {
   usdCopRate: 4200,
   priceRefreshTimer: null,
   pricesLastUpdated: null,
+  pendingWrites: [],        // offline write queue — flushed on reconnect
+  _refreshing: false,       // guard: prevent concurrent refreshInvestmentPrices
+  _sheetIdMap: {},          // cache: { tabName → sheetId int } — avoids per-delete metadata read
+  _lastPriceSheetWrite: 0,  // timestamp of last Sheets write-back for prices
   categories: {
     Gasto:   ['Vehículo','SimRacing','Alimentación','Transporte','Servicios','Entretenimiento','Salud','Educación','Hogar','Otros'],
     Ingreso: ['Salario','Freelance','Inversiones','Arriendos','Bonos','Otros']
@@ -144,6 +148,7 @@ function saveLocal() {
   idbSet('subscriptions', state.subscriptions);
   idbSet('categories',    state.categories);
   idbSet('budgets',       state.budgets);
+  idbSet('pendingWrites', state.pendingWrites);
 
   // Persist market prices separately so they survive reloads (offline-first)
   if (state.pricesLastUpdated) {
@@ -164,12 +169,12 @@ function saveLocal() {
 
 async function loadLocal() {
   try {
-    const [idbInv, idbTx, idbSav, idbPur, idbSheetId, idbAlerts, idbSnaps, idbSubs, idbCats, idbBudgets, idbPrices, idbPriceTs] = await Promise.all([
+    const [idbInv, idbTx, idbSav, idbPur, idbSheetId, idbAlerts, idbSnaps, idbSubs, idbCats, idbBudgets, idbPrices, idbPriceTs, idbPending] = await Promise.all([
       idbGet('investments'), idbGet('transactions'), idbGet('savings'),
       idbGet('purchases'),   idbGet('sheetId'),
       idbGet('alerts'),      idbGet('snapshots'),
       idbGet('subscriptions'), idbGet('categories'), idbGet('budgets'),
-      idbGet('marketPrices'), idbGet('pricesLastUpdated')
+      idbGet('marketPrices'), idbGet('pricesLastUpdated'), idbGet('pendingWrites')
     ]);
     state.transactions        = idbTx      || JSON.parse(localStorage.getItem('finanzas_transactions')   || '[]');
     state.savings             = idbSav     || JSON.parse(localStorage.getItem('finanzas_savings')        || '[]');
@@ -191,6 +196,7 @@ async function loadLocal() {
       });
     }
     if (idbPriceTs) state.pricesLastUpdated = new Date(idbPriceTs);
+    if (idbPending) state.pendingWrites = idbPending;
   } catch(e) {
     state.transactions = []; state.savings = []; state.investments = []; state.subscriptions = []; state.budgets = [];
   }
@@ -915,40 +921,43 @@ function checkAlerts() {
 }
 
 async function refreshInvestmentPrices() {
-  await fetchExchangeRate();
-  fetchBenchmarks(); // non-blocking, updates view when ready
-  let updated = false;
-  for (const inv of state.investments) {
-    if (!inv.ticker) continue;
-    const q = await fetchQuote(inv.ticker);
-    if (!q) continue;
-    inv.marketPrice    = q.price;
-    inv.marketChange   = q.change;
-    inv.marketChangePct = q.changePct;
-    inv.marketCurrency = q.currency;
-    inv.marketName     = q.name;
-    inv.marketExchange = q.exchange;
-    // Auto-update currentValue when shares are tracked
-    if (Number(inv.shares) > 0) {
-      const valueUSD = Number(inv.shares) * q.price;
-      inv.currentValue = valueUSD;
-      updated = true;
+  if (state._refreshing) return; // prevent concurrent executions (timer + navigation)
+  state._refreshing = true;
+  try {
+    await fetchExchangeRate();
+    fetchBenchmarks(); // non-blocking
+    let updated = false;
+    for (const inv of state.investments) {
+      if (!inv.ticker) continue;
+      const q = await fetchQuote(inv.ticker);
+      if (!q) continue;
+      inv.marketPrice     = q.price;
+      inv.marketChange    = q.change;
+      inv.marketChangePct = q.changePct;
+      inv.marketCurrency  = q.currency;
+      inv.marketName      = q.name;
+      inv.marketExchange  = q.exchange;
+      if (Number(inv.shares) > 0) {
+        inv.currentValue = Number(inv.shares) * q.price;
+        updated = true;
+      }
     }
-  }
-  state.pricesLastUpdated = new Date();
-  checkAlerts();
-  if (updated) {
-    saveLocal();
-    if (state.accessToken) {
-      // Update Inversiones!F (Valor Actual) with fresh prices
-      for (const inv of state.investments) {
-        if (inv.ticker && Number(inv.shares) > 0) {
-          try { await updateRowById('Inversiones', inv.id, invArr(inv)); } catch(e) {}
+    state.pricesLastUpdated = new Date();
+    checkAlerts();
+    if (updated) {
+      saveLocal();
+      if (state.accessToken) {
+        // Write-back to Sheets at most every 5 minutes (batch: 1 read + 1 batchUpdate)
+        const now = Date.now();
+        if (now - state._lastPriceSheetWrite > 300000) {
+          state._lastPriceSheetWrite = now;
+          await batchUpdateInvestmentRows();
+          syncPreciosTab().catch(() => {});
         }
       }
-      // Update Precios tab with latest marketPrice numbers (non-blocking)
-      syncPreciosTab().catch(() => {});
     }
+  } finally {
+    state._refreshing = false;
   }
 }
 
@@ -1047,6 +1056,7 @@ async function applyAccessToken(token, expiresIn) {
   updateAuthUI(true);
   updateSyncBadge('Sincronizando…', 'syncing');
   await ensureSpreadsheet();
+  await flushPendingWrites(); // drain offline queue before syncing
   await syncFromSheets();
   updateSyncBadge('Sincronizado ✓', 'synced');
   renderView();
@@ -1238,21 +1248,17 @@ async function syncPreciosTab() {
   if (!tickers.length) return;
   try {
     await ensurePreciosSheet();
-    await Sheets.spreadsheets.values.batchClear({
-      spreadsheetId: state.spreadsheetId,
-      resource: { ranges: ['Precios!A2:C'] }
-    });
     const now = new Date().toLocaleString('es-CO');
     const rows = tickers.map(t => {
       const inv = state.investments.find(i => i.ticker === t);
-      const price = inv?.marketPrice || inv?.purchasePrice || 0;
-      return [t, price, now];
+      return [t, inv?.marketPrice || inv?.purchasePrice || 0, now];
     });
-    await Sheets.spreadsheets.values.batchUpdate({
+    // Single values.update — replaces existing rows, no separate batchClear needed
+    await Sheets.spreadsheets.values.update({
       spreadsheetId: state.spreadsheetId,
-      resource: { valueInputOption: 'RAW', data: [
-        { range: 'Precios!A2:C', values: rows }
-      ]}
+      range: `Precios!A2:C${1 + rows.length}`,
+      valueInputOption: 'RAW',
+      resource: { values: rows }
     });
   } catch(e) { console.warn('syncPreciosTab:', e); }
 }
@@ -1341,7 +1347,9 @@ async function ensurePresupuestoSheet() {
 }
 
 async function loadBudgets() {
+  if (!state.spreadsheetId || !state.accessToken) return;
   try {
+    // Optimistic read — avoid the extra spreadsheets.get from ensurePresupuestoSheet
     const resp = await Sheets.spreadsheets.values.get({
       spreadsheetId: state.spreadsheetId, range: 'Presupuesto!A2:C', valueRenderOption: 'UNFORMATTED_VALUE'
     });
@@ -1349,7 +1357,7 @@ async function loadBudgets() {
       .map(r => ({ id: r[0] || uid(), category: r[1] || '', monthlyLimit: Number(r[2]) || 0 }))
       .filter(b => b.category && b.monthlyLimit > 0);
     saveLocal();
-  } catch(e) { await ensurePresupuestoSheet(); }
+  } catch(e) { await ensurePresupuestoSheet().catch(() => {}); }
 }
 
 async function saveBudget(budget) {
@@ -1357,12 +1365,12 @@ async function saveBudget(budget) {
   if (existing) {
     existing.monthlyLimit = budget.monthlyLimit;
     saveLocal();
-    try { await updateRowById('Presupuesto', existing.id, [existing.id, existing.category, existing.monthlyLimit]); } catch(e) {}
+    try { await updateRowById('Presupuesto', existing.id, [existing.id, existing.category, existing.monthlyLimit]); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
   } else {
     budget.id = uid();
     state.budgets.push(budget);
     saveLocal();
-    try { await appendRow('Presupuesto', [budget.id, budget.category, budget.monthlyLimit]); } catch(e) {}
+    try { await appendRow('Presupuesto', [budget.id, budget.category, budget.monthlyLimit]); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
   }
   renderView();
 }
@@ -1370,7 +1378,7 @@ async function saveBudget(budget) {
 async function deleteBudget(id) {
   state.budgets = state.budgets.filter(b => b.id !== id);
   saveLocal();
-  try { await deleteRowById('Presupuesto', id); } catch(e) {}
+  try { await deleteRowById('Presupuesto', id); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
   renderView();
 }
 
@@ -1431,77 +1439,93 @@ async function saveMonthlySnapshot() {
 async function loadSnapshots() {
   if (!state.spreadsheetId || !state.accessToken) return;
   try {
-    await ensureSnapshotsSheet();
+    // Optimistic read — avoid the extra spreadsheets.get from ensureSnapshotsSheet
     const resp = await Sheets.spreadsheets.values.get({
       spreadsheetId: state.spreadsheetId, range: 'Snapshots!A2:F', valueRenderOption: 'UNFORMATTED_VALUE'
     });
     const rows = resp.result.values || [];
-    if (rows.length === 0) return;
+    if (!rows.length) return;
     state.snapshots = rows.map(r => ({
       month: r[0] || '', portfolioUSD: Number(r[1]) || 0,
       investedUSD: Number(r[2]) || 0, balanceCOP: Number(r[3]) || 0,
       patrimonioCOP: Number(r[4]) || 0, ts: r[5] || ''
     })).filter(s => s.month);
     saveLocal();
-  } catch(e) { console.warn('loadSnapshots:', e); }
+  } catch(e) {
+    // Tab doesn't exist yet — create it and continue with empty snapshots
+    await ensureSnapshotsSheet().catch(() => {});
+  }
 }
 
 async function syncFromSheets() {
   if (!state.spreadsheetId || !state.accessToken) return;
-  // Migration v5: add Compras_Inv audit columns O:P (Invertido ∑Compras, Acciones ∑Compras)
+  // Migration v5
   if (!localStorage.getItem('finanzas_formulas_v5')) {
-    localStorage.removeItem('finanzas_formulas_v1');
-    localStorage.removeItem('finanzas_formulas_v2');
-    localStorage.removeItem('finanzas_formulas_v3');
-    localStorage.removeItem('finanzas_formulas_v4');
+    localStorage.removeItem('finanzas_formulas_v1'); localStorage.removeItem('finanzas_formulas_v2');
+    localStorage.removeItem('finanzas_formulas_v3'); localStorage.removeItem('finanzas_formulas_v4');
     await migrateInversionesFormulas();
     localStorage.setItem('finanzas_formulas_v5', '1');
   }
   try {
+    // 1 batchGet for all 5 guaranteed tabs (was 5 sequential calls)
     const resp = await Sheets.spreadsheets.values.batchGet({
       spreadsheetId: state.spreadsheetId,
-      ranges:['Transacciones!A2:G','Ahorro!A2:F','Inversiones!A2:I'],
+      ranges: ['Transacciones!A2:G','Ahorro!A2:F','Inversiones!A2:I','Compras_Inv!A2:F','Suscripciones!A2:H'],
       valueRenderOption: 'UNFORMATTED_VALUE'
     });
     const vrs = resp.result.valueRanges;
+
+    // ── Transactions: merge back any offline-only items before overwriting ──
+    const sheetTxIds = new Set((vrs[0].values || []).map(r => r[0]).filter(Boolean));
+    const offlineTxs = state.transactions.filter(tx => tx.id && !sheetTxIds.has(tx.id));
     state.transactions = (vrs[0].values||[]).map(r=>({ id:r[0]||uid(), date:r[1]||'', type:r[2]||'Gasto', category:r[3]||'Otros', description:r[4]||'', amount:Number(r[5])||0, paymentMethod:r[6]||'' })).filter(t=>t.date);
-    state.savings      = (vrs[1].values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', goal:Number(r[2])||0, current:Number(r[3])||0, deadline:r[4]||'', notes:r[5]||'' })).filter(s=>s.name);
-    // Snapshot local investments before overwriting — used as fallback below
+    for (const tx of offlineTxs) {
+      state.transactions.unshift(tx);
+      // Queue for write unless already in the pending queue
+      if (!state.pendingWrites.some(w => w.op === 'append' && w.values[0] === tx.id)) {
+        state.pendingWrites.push({ op: 'append', sheet: 'Transacciones', values: [tx.id,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||''] });
+      }
+    }
+
+    // ── Savings: same offline merge ──
+    const sheetSavIds = new Set((vrs[1].values || []).map(r => r[0]).filter(Boolean));
+    const offlineSavs = state.savings.filter(s => s.id && !sheetSavIds.has(s.id));
+    state.savings = (vrs[1].values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', goal:Number(r[2])||0, current:Number(r[3])||0, deadline:r[4]||'', notes:r[5]||'' })).filter(s=>s.name);
+    for (const g of offlineSavs) {
+      state.savings.push(g);
+      if (!state.pendingWrites.some(w => w.op === 'append' && w.values[0] === g.id)) {
+        state.pendingWrites.push({ op: 'append', sheet: 'Ahorro', values: [g.id,g.name,g.goal,g.current,g.deadline,g.notes||''] });
+      }
+    }
+
+    // ── Investments (no offline merge — investment ops require being online) ──
     const prevInvestments = [...state.investments];
     state.investments = (vrs[2].values||[]).map(r => {
       const inv = { id:r[0]||uid(), name:r[1]||'', ticker:r[2]||'', type:r[3]||'',
         invested:Number(r[4])||0, currentValue:Number(r[5])||0,
         shares:Number(r[6])||0, purchasePrice:Number(r[7])||0, notes:r[8]||'' };
-      // Auto-repair: if shares=0 but invested>0 and purchasePrice>0 → recalculate
-      if (inv.shares === 0 && inv.invested > 0 && inv.purchasePrice > 0) {
+      if (inv.shares === 0 && inv.invested > 0 && inv.purchasePrice > 0)
         inv.shares = Math.round(inv.invested / inv.purchasePrice * 1e8) / 1e8;
-      }
-      // Fallback: if sheet still has zeros, restore from last good local state.
-      // This prevents a reconnect from wiping values the user already sees correctly.
       const prev = prevInvestments.find(p => p.id === inv.id);
       if (prev) {
         if (inv.shares === 0 && prev.shares > 0)               inv.shares = prev.shares;
         if (inv.purchasePrice === 0 && prev.purchasePrice > 0) inv.purchasePrice = prev.purchasePrice;
         if (inv.currentValue === 0 && prev.currentValue > 0)   inv.currentValue = prev.currentValue;
-        // Carry over live market data — never stored in the sheet
-        if (prev.marketPrice)    inv.marketPrice    = prev.marketPrice;
-        if (prev.marketChange)   inv.marketChange   = prev.marketChange;
-        if (prev.marketChangePct)inv.marketChangePct= prev.marketChangePct;
-        if (prev.marketCurrency) inv.marketCurrency = prev.marketCurrency;
+        if (prev.marketPrice)     inv.marketPrice     = prev.marketPrice;
+        if (prev.marketChange)    inv.marketChange    = prev.marketChange;
+        if (prev.marketChangePct) inv.marketChangePct = prev.marketChangePct;
+        if (prev.marketCurrency)  inv.marketCurrency  = prev.marketCurrency;
       }
-      // Last resort: if currentValue is still 0 but invested>0, show cost basis
       if (inv.currentValue === 0 && inv.invested > 0) inv.currentValue = inv.invested;
       return inv;
     }).filter(i=>i.name);
+
+    // ── Compras_Inv (now from batchGet vrs[3]) ──
     try {
-      const purResp = await Sheets.spreadsheets.values.get({
-        spreadsheetId:state.spreadsheetId, range:'Compras_Inv!A2:F', valueRenderOption:'UNFORMATTED_VALUE'
-      });
       const repairedIds = new Set();
-      state.investmentPurchases = (purResp.result.values||[]).map(r => {
+      state.investmentPurchases = (vrs[3].values||[]).map(r => {
         const p = { id:r[0]||uid(), investmentId:r[1]||'', date:r[2]||'',
           shares:Number(r[3])||0, priceUSD:Number(r[4])||0, amountUSD:Number(r[5])||0 };
-        // Auto-repair: if priceUSD=0 but parent investment has purchasePrice, use it
         if (p.priceUSD === 0 && p.amountUSD > 0) {
           const parent = state.investments.find(i=>i.id===p.investmentId);
           if (parent && parent.purchasePrice > 0) {
@@ -1512,18 +1536,11 @@ async function syncFromSheets() {
         }
         return p;
       }).filter(p=>p.investmentId);
-      // Write only actually-repaired purchases back to Compras_Inv so they persist
       const repairedPurchases = state.investmentPurchases.filter(p => repairedIds.has(p.id));
       for (const p of repairedPurchases) {
         try { await updateRowById('Compras_Inv', p.id, [p.id,p.investmentId,p.date,p.shares,p.priceUSD,p.amountUSD]); } catch(e) {}
       }
-      // Recalc all investments that have purchases with real amountUSD > 0.
-      // Guards against stale Inversiones rows when a 2nd purchase was added but
-      // the sheet write failed (network/offline). Skips investments whose purchases
-      // all have amountUSD=0 (e.g. SCHD/ETH-USD manually entered) to avoid zeroing invested.
-      const purchasedInvIds = new Set(
-        state.investmentPurchases.filter(p => p.amountUSD > 0).map(p => p.investmentId)
-      );
+      const purchasedInvIds = new Set(state.investmentPurchases.filter(p => p.amountUSD > 0).map(p => p.investmentId));
       for (const invId of purchasedInvIds) {
         const inv = state.investments.find(i => i.id === invId);
         if (!inv) continue;
@@ -1534,35 +1551,100 @@ async function syncFromSheets() {
         }
       }
     } catch(e) { await ensureComprasInvSheet(); }
+
+    // ── Suscripciones (now from batchGet vrs[4]) ──
     try {
-      const subResp = await Sheets.spreadsheets.values.get({
-        spreadsheetId:state.spreadsheetId, range:'Suscripciones!A2:H', valueRenderOption:'UNFORMATTED_VALUE'
-      });
-      state.subscriptions = (subResp.result.values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', amount:Number(r[2])||0, currency:r[3]||'COP', frequency:r[4]||'monthly', nextPaymentDate:r[5]||'', category:r[6]||'Servicios', notes:r[7]||'' })).filter(s=>s.name);
+      state.subscriptions = (vrs[4].values||[]).map(r=>({ id:r[0]||uid(), name:r[1]||'', amount:Number(r[2])||0, currency:r[3]||'COP', frequency:r[4]||'monthly', nextPaymentDate:r[5]||'', category:r[6]||'Servicios', notes:r[7]||'' })).filter(s=>s.name);
     } catch(e) { await ensureSuscripcionesSheet(); }
+
     saveLocal();
-    // Load snapshots and budgets from Sheet
-    await loadSnapshots();
+
+    // Snapshots + budgets in parallel (optimistic read — ensure only on failure)
+    await Promise.all([loadSnapshots(), loadBudgets()]);
     await saveMonthlySnapshot();
-    await loadBudgets();
+
+    // Flush any offline writes that accumulated (e.g. offline tx now merged above)
+    if (state.pendingWrites.length) {
+      idbSet('pendingWrites', state.pendingWrites);
+      flushPendingWrites().catch(() => {});
+    }
   } catch(e) { console.error('syncFromSheets', e); }
 }
 
 /* ── Sheets write helpers ────────────────────────────────── */
+
+// Cache sheetId integers so deleteRowById doesn't call spreadsheets.get every time
+async function getSheetId(tabName) {
+  if (state._sheetIdMap[tabName] != null) return state._sheetIdMap[tabName];
+  const meta = await Sheets.spreadsheets.get({ spreadsheetId: state.spreadsheetId });
+  meta.result.sheets.forEach(s => {
+    state._sheetIdMap[s.properties.title] = s.properties.sheetId;
+  });
+  return state._sheetIdMap[tabName] ?? null;
+}
+
+// Central error reporter for all write failures (badge + toast)
+function reportWriteError(e) {
+  updateSyncBadge('Error sync', 'error');
+  showToast(`Error al guardar: ${e?.message || 'Sin conexión'}`, 'error', 4000);
+  setTimeout(() => { if (state.accessToken) updateSyncBadge('Sincronizado ✓', 'synced'); }, 5000);
+}
+
+// Batch price write-back: resolves all row indices in 1 read, then 1 batchUpdate
+async function batchUpdateInvestmentRows() {
+  if (!state.spreadsheetId || !state.accessToken) return;
+  const toUpdate = state.investments.filter(i => i.ticker && Number(i.shares) > 0);
+  if (!toUpdate.length) return;
+  try {
+    const resp = await Sheets.spreadsheets.values.get({
+      spreadsheetId: state.spreadsheetId, range: 'Inversiones!A:A'
+    });
+    const rows = resp.result.values || [];
+    const data = toUpdate.map(inv => {
+      const rowIndex = rows.findIndex(r => r[0] === inv.id);
+      if (rowIndex < 1) return null;
+      return { range: `Inversiones!A${rowIndex + 1}`, values: [invArr(inv)] };
+    }).filter(Boolean);
+    if (!data.length) return;
+    await Sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: state.spreadsheetId,
+      resource: { valueInputOption: 'RAW', data }
+    });
+  } catch(e) { /* best-effort: price write-back failure doesn't affect local state */ }
+}
+
+// Flush offline write queue — call before syncFromSheets when token becomes available
+async function flushPendingWrites() {
+  if (!state.pendingWrites.length || !state.accessToken || !state.spreadsheetId) return;
+  const queue = [...state.pendingWrites];
+  state.pendingWrites = [];
+  idbSet('pendingWrites', []);
+  for (const w of queue) {
+    try {
+      if (w.op === 'append')    await appendRow(w.sheet, w.values);
+      else if (w.op === 'update') await updateRowById(w.sheet, w.id, w.values);
+      else if (w.op === 'delete') await deleteRowById(w.sheet, w.id);
+    } catch(e) {
+      state.pendingWrites.push(w); // re-queue failed writes
+    }
+  }
+  if (state.pendingWrites.length) idbSet('pendingWrites', state.pendingWrites);
+}
+
 async function appendRow(sheet, values) {
   if (!state.spreadsheetId || !state.accessToken) return;
   await Sheets.spreadsheets.values.append({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A1`, valueInputOption:'RAW', insertDataOption:'INSERT_ROWS', resource:{values:[values]} });
 }
 async function deleteRowById(sheet, id) {
   if (!state.spreadsheetId || !state.accessToken) return;
-  const resp = await Sheets.spreadsheets.values.get({ spreadsheetId:state.spreadsheetId, range:`${sheet}!A:A` });
-  const rows = resp.result.values || [];
-  const rowIndex = rows.findIndex(r=>r[0]===id);
-  if (rowIndex < 1) return;
-  const meta = await Sheets.spreadsheets.get({spreadsheetId:state.spreadsheetId});
-  const sh = meta.result.sheets.find(s=>s.properties.title===sheet);
-  if (!sh) return;
-  await Sheets.spreadsheets.batchUpdate({ spreadsheetId:state.spreadsheetId, resource:{requests:[{deleteDimension:{range:{sheetId:sh.properties.sheetId,dimension:'ROWS',startIndex:rowIndex,endIndex:rowIndex+1}}}]} });
+  const [idColResp, sheetId] = await Promise.all([
+    Sheets.spreadsheets.values.get({ spreadsheetId: state.spreadsheetId, range: `${sheet}!A:A` }),
+    getSheetId(sheet)
+  ]);
+  const rows = idColResp.result.values || [];
+  const rowIndex = rows.findIndex(r => r[0] === id);
+  if (rowIndex < 1 || sheetId == null) return;
+  await Sheets.spreadsheets.batchUpdate({ spreadsheetId: state.spreadsheetId, resource: { requests: [{ deleteDimension: { range: { sheetId, dimension: 'ROWS', startIndex: rowIndex, endIndex: rowIndex + 1 } } }] } });
 }
 async function updateRowById(sheet, id, values) {
   if (!state.spreadsheetId || !state.accessToken) return;
@@ -1576,31 +1658,57 @@ async function updateRowById(sheet, id, values) {
 /* ── CRUD: Transactions ──────────────────────────────────── */
 async function addTransaction(tx) {
   tx.id = uid(); state.transactions.unshift(tx); saveLocal(); renderView();
-  if (!state.accessToken) return;
-  try { await appendRow('Transacciones',[tx.id,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||'']); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { updateSyncBadge('Error sync','error'); }
+  const row = [tx.id,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||''];
+  if (!state.accessToken) {
+    state.pendingWrites.push({ op: 'append', sheet: 'Transacciones', values: row });
+    idbSet('pendingWrites', state.pendingWrites); return;
+  }
+  try { await appendRow('Transacciones', row); updateSyncBadge('Sincronizado ✓','synced'); }
+  catch(e) { reportWriteError(e); }
 }
 async function deleteTransaction(id) {
   state.transactions = state.transactions.filter(t=>t.id!==id); saveLocal(); renderView();
-  if (!state.accessToken) return;
-  try { await deleteRowById('Transacciones',id); } catch(e) {}
+  // Remove any queued append for this id (deleted before it was ever written)
+  state.pendingWrites = state.pendingWrites.filter(w => !(w.op === 'append' && w.values[0] === id));
+  if (!state.accessToken) {
+    state.pendingWrites.push({ op: 'delete', sheet: 'Transacciones', id });
+    idbSet('pendingWrites', state.pendingWrites); return;
+  }
+  try { await deleteRowById('Transacciones', id); updateSyncBadge('Sincronizado ✓','synced'); }
+  catch(e) { reportWriteError(e); }
 }
 
 /* ── CRUD: Savings ───────────────────────────────────────── */
 async function addSavingsGoal(goal) {
   goal.id = uid(); goal.current = 0; state.savings.push(goal); saveLocal(); renderView();
-  if (!state.accessToken) return;
-  try { await appendRow('Ahorro',[goal.id,goal.name,goal.goal,0,goal.deadline,goal.notes||'']); } catch(e) {}
+  const row = [goal.id,goal.name,goal.goal,0,goal.deadline,goal.notes||''];
+  if (!state.accessToken) {
+    state.pendingWrites.push({ op: 'append', sheet: 'Ahorro', values: row });
+    idbSet('pendingWrites', state.pendingWrites); return;
+  }
+  try { await appendRow('Ahorro', row); updateSyncBadge('Sincronizado ✓','synced'); }
+  catch(e) { reportWriteError(e); }
 }
 async function updateSavingsProgress(id, addAmount) {
   const g = state.savings.find(s=>s.id===id); if (!g) return;
   g.current = Math.min(g.current+Number(addAmount), g.goal); saveLocal(); renderView();
-  if (!state.accessToken) return;
-  try { await updateRowById('Ahorro',id,[id,g.name,g.goal,g.current,g.deadline,g.notes||'']); } catch(e) {}
+  const row = [id,g.name,g.goal,g.current,g.deadline,g.notes||''];
+  if (!state.accessToken) {
+    state.pendingWrites.push({ op: 'update', sheet: 'Ahorro', id, values: row });
+    idbSet('pendingWrites', state.pendingWrites); return;
+  }
+  try { await updateRowById('Ahorro', id, row); updateSyncBadge('Sincronizado ✓','synced'); }
+  catch(e) { reportWriteError(e); }
 }
 async function deleteSavingsGoal(id) {
   state.savings = state.savings.filter(s=>s.id!==id); saveLocal(); renderView();
-  if (!state.accessToken) return;
-  try { await deleteRowById('Ahorro',id); } catch(e) {}
+  state.pendingWrites = state.pendingWrites.filter(w => !(w.op === 'append' && w.values[0] === id));
+  if (!state.accessToken) {
+    state.pendingWrites.push({ op: 'delete', sheet: 'Ahorro', id });
+    idbSet('pendingWrites', state.pendingWrites); return;
+  }
+  try { await deleteRowById('Ahorro', id); updateSyncBadge('Sincronizado ✓','synced'); }
+  catch(e) { reportWriteError(e); }
 }
 
 /* ── Subscriptions: helpers ──────────────────────────────── */
@@ -1650,12 +1758,12 @@ async function addSubscription(sub) {
   sub.id = uid();
   state.subscriptions.push(sub); saveLocal(); renderView();
   if (!state.accessToken) return;
-  try { await appendRow('Suscripciones',[sub.id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); } catch(e) {}
+  try { await appendRow('Suscripciones',[sub.id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
 }
 async function deleteSubscription(id) {
   state.subscriptions = state.subscriptions.filter(s=>s.id!==id); saveLocal(); renderView();
   if (!state.accessToken) return;
-  try { await deleteRowById('Suscripciones',id); } catch(e) {}
+  try { await deleteRowById('Suscripciones',id); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
 }
 async function markSubscriptionPaid(id, createTx = true) {
   const sub = state.subscriptions.find(s=>s.id===id); if (!sub) return;
@@ -1666,7 +1774,7 @@ async function markSubscriptionPaid(id, createTx = true) {
   sub.nextPaymentDate = calcNextPaymentDate(sub.frequency, todayISO());
   saveLocal(); renderView();
   if (!state.accessToken) return;
-  try { await updateRowById('Suscripciones',id,[id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); } catch(e) {}
+  try { await updateRowById('Suscripciones',id,[id,sub.name,sub.amount,sub.currency,sub.frequency,sub.nextPaymentDate,sub.category,sub.notes||'']); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
 }
 
 /* ── Investment row helper ───────────────────────────────── */
@@ -1681,21 +1789,28 @@ async function addInvestment(inv) {
   inv.id = uid();
   if (!inv.currentValue) inv.currentValue = inv.invested;
   state.investments.push(inv); saveLocal(); renderView();
-  try { await appendRow('Inversiones', invArr(inv)); } catch(e) {}
+  if (!state.accessToken) return;
+  try { await appendRow('Inversiones', invArr(inv)); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
   if (inv.ticker) syncPreciosTab().catch(()=>{});
 }
 async function updateInvestmentValue(id, newValue) {
   const inv = state.investments.find(i=>i.id===id); if (!inv) return;
   inv.currentValue = Number(newValue); saveLocal(); renderView();
-  try { await updateRowById('Inversiones', id, invArr(inv)); } catch(e) {}
+  if (!state.accessToken) return;
+  try { await updateRowById('Inversiones', id, invArr(inv)); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
 }
 async function deleteInvestment(id) {
   const relPurchases = state.investmentPurchases.filter(p=>p.investmentId===id);
   state.investments = state.investments.filter(i=>i.id!==id);
   state.investmentPurchases = state.investmentPurchases.filter(p=>p.investmentId!==id);
   saveLocal(); renderView();
-  try { await deleteRowById('Inversiones',id); } catch(e) {}
-  for (const p of relPurchases) { try { await deleteRowById('Compras_Inv',p.id); } catch(e) {} }
+  if (!state.accessToken) return;
+  // Delete children first, then parent (avoids orphaned purchase rows on partial failure)
+  try {
+    await Promise.all(relPurchases.map(p => deleteRowById('Compras_Inv', p.id)));
+    await deleteRowById('Inversiones', id);
+    updateSyncBadge('Sincronizado ✓','synced');
+  } catch(e) { reportWriteError(e); }
   syncPreciosTab().catch(()=>{});
 }
 
@@ -1704,11 +1819,13 @@ async function addInvestmentPurchase(purchase) {
   state.investmentPurchases.push(purchase);
   recalcInvestment(purchase.investmentId);
   saveLocal(); renderView();
+  if (!state.accessToken) return;
   const inv = state.investments.find(i=>i.id===purchase.investmentId);
   try {
     await appendRow('Compras_Inv',[purchase.id,purchase.investmentId,purchase.date,purchase.shares,purchase.priceUSD,purchase.amountUSD]);
     if (inv) await updateRowById('Inversiones', inv.id, invArr(inv));
-  } catch(e) {}
+    updateSyncBadge('Sincronizado ✓','synced');
+  } catch(e) { reportWriteError(e); }
 }
 
 async function deleteInvestmentPurchase(purchaseId) {
@@ -1718,9 +1835,13 @@ async function deleteInvestmentPurchase(purchaseId) {
   state.investmentPurchases = state.investmentPurchases.filter(p=>p.id!==purchaseId);
   recalcInvestment(invId);
   saveLocal(); renderView();
-  try { await deleteRowById('Compras_Inv', purchaseId); } catch(e) {}
+  if (!state.accessToken) return;
   const inv = state.investments.find(i=>i.id===invId);
-  if (inv) { try { await updateRowById('Inversiones', inv.id, invArr(inv)); } catch(e) {} }
+  try {
+    await deleteRowById('Compras_Inv', purchaseId);
+    if (inv) await updateRowById('Inversiones', inv.id, invArr(inv));
+    updateSyncBadge('Sincronizado ✓','synced');
+  } catch(e) { reportWriteError(e); }
 }
 
 function openEditPurchaseModal(purchaseId) {
@@ -1946,7 +2067,7 @@ async function submitTransaction(e, editId) {
     const idx = state.transactions.findIndex(t=>t.id===editId);
     if (idx>=0) state.transactions[idx] = {...state.transactions[idx],...tx};
     saveLocal(); renderView();
-    try { await updateRowById('Transacciones',editId,[editId,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||'']); } catch(e) {}
+    try { await updateRowById('Transacciones',editId,[editId,tx.date,tx.type,tx.category,tx.description,tx.amount,tx.paymentMethod||'']); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
   } else {
     await addTransaction(tx);
     // Auto-link: if a Gasto matches a subscription name, advance its next payment date
@@ -2019,7 +2140,7 @@ async function submitEditSavings(e, id) {
   s.notes    = document.getElementById('sv-edit-notes').value.trim();
   closeModal(); saveLocal(); renderView();
   if (!state.accessToken) return;
-  try { await updateRowById('Ahorro',id,[id,s.name,s.goal,s.current,s.deadline,s.notes||'']); } catch(e) {}
+  try { await updateRowById('Ahorro',id,[id,s.name,s.goal,s.current,s.deadline,s.notes||'']); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
 }
 
 /* ── Subscription Modal ──────────────────────────────────── */
@@ -2091,7 +2212,7 @@ async function submitSubscription(e, editId) {
     if (idx>=0) state.subscriptions[idx] = {...state.subscriptions[idx],...sub};
     saveLocal(); renderView();
     const s = state.subscriptions[idx>=0?idx:0];
-    try { await updateRowById('Suscripciones',editId,[editId,s.name,s.amount,s.currency,s.frequency,s.nextPaymentDate,s.category,s.notes||'']); } catch(e) {}
+    try { await updateRowById('Suscripciones',editId,[editId,s.name,s.amount,s.currency,s.frequency,s.nextPaymentDate,s.category,s.notes||'']); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
   } else { await addSubscription(sub); }
 }
 
@@ -2448,7 +2569,7 @@ async function submitEditInvestment(e, id) {
   }
   closeModal(); saveLocal(); renderView();
   if (!state.accessToken) return;
-  try { await updateRowById('Inversiones', id, invArr(inv)); } catch(e) {}
+  try { await updateRowById('Inversiones', id, invArr(inv)); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
 }
 
 /* ── Confirm delete ──────────────────────────────────────── */
@@ -2657,7 +2778,7 @@ async function submitEditBudget(id) {
   b.monthlyLimit = amount;
   saveLocal();
   closeModal();
-  try { await updateRowById('Presupuesto', id, [id, b.category, b.monthlyLimit]); } catch(e) {}
+  try { await updateRowById('Presupuesto', id, [id, b.category, b.monthlyLimit]); updateSyncBadge('Sincronizado ✓','synced'); } catch(e) { reportWriteError(e); }
   renderView();
 }
 
@@ -3494,7 +3615,16 @@ window.addEventListener('DOMContentLoaded', () => {
       checkSubscriptionNotifications();
     }
   });
-  // Re-render on connectivity change so offline banner appears/disappears reactively
-  window.addEventListener('online',  () => renderView());
+  // Re-render on connectivity change + trigger full sync on reconnect
   window.addEventListener('offline', () => renderView());
+  window.addEventListener('online', async () => {
+    renderView(); // update offline banner immediately
+    if (state.accessToken) {
+      await flushPendingWrites();
+      updateSyncBadge('Sincronizando…', 'syncing');
+      await syncFromSheets();
+      updateSyncBadge('Sincronizado ✓', 'synced');
+      renderView();
+    }
+  });
 });
